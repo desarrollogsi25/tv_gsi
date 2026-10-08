@@ -39,6 +39,9 @@ jobs:
           node --check src/routes/media.js
           node --check src/sockets/index.js
 
+      - name: Run Unit Tests
+        run: npm test
+
   frontend-lint-and-build:
     name: Frontend Build & Oxlint
     runs-on: ubuntu-latest

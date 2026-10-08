@@ -44,8 +44,13 @@ function initCronJobs() {
                 if (!activeFiles.has(file)) {
                     const fullPath = path.join(mediaDirectory, file);
                     try {
-                        fs.unlinkSync(fullPath);
-                        cleaned++;
+                        const stats = fs.statSync(fullPath);
+                        const oneHourAgo = Date.now() - (60 * 60 * 1000);
+                        // Solo eliminar si el archivo tiene más de 1 hora de haber sido creado/modificado
+                        if (stats.mtimeMs < oneHourAgo) {
+                            fs.unlinkSync(fullPath);
+                            cleaned++;
+                        }
                     } catch (e) {}
                 }
             }
