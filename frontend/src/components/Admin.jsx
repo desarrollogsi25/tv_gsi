@@ -64,6 +64,30 @@ const Admin = () => {
                     <div className="topbar-right">
                         <span className="topbar-chip">🟢 Sistema Online</span>
                         <span className="topbar-date">{new Date().toLocaleDateString('es-ES', { weekday: 'short', month: 'short', day: 'numeric' })}</span>
+                        <button
+                            onClick={() => {
+                                localStorage.removeItem('token');
+                                localStorage.removeItem('user');
+                                window.location.href = '/admin';
+                            }}
+                            title="Cerrar sesión"
+                            style={{
+                                background: 'rgba(255, 59, 48, 0.1)',
+                                color: '#ff3b30',
+                                border: '1px solid rgba(255, 59, 48, 0.25)',
+                                borderRadius: '9999px',
+                                padding: '6px 14px',
+                                fontSize: '12px',
+                                fontWeight: '500',
+                                cursor: 'pointer',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '6px',
+                                marginLeft: '8px'
+                            }}
+                        >
+                            <span>Salir</span>
+                        </button>
                     </div>
                 </header>
                 <main className="admin-main">
