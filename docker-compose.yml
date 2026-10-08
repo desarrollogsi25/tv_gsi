@@ -1,0 +1,80 @@
+services:
+  db:
+    container_name: tv-db
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PG_USER:-tv}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-Gs1$2099Dr#24zXcv}
+      POSTGRES_DB: ${PG_DATABASE:-nexus_tv}
+    ports:
+      - "${HOST_DB_PORT:-25432}:5432"
+    volumes:
+      - tv_pgdata:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-tv} -d ${PG_DATABASE:-nexus_tv}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - tv_network
+
+  backend:
+    container_name: tv-backend
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${HOST_API_PORT:-23002}:3002"
+    volumes:
+      - ./media:/app/media
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - PG_HOST=db
+      - PG_PORT=5432
+      - PG_USER=${PG_USER:-tv}
+      - PG_PASSWORD=${PG_PASSWORD:-Gs1$2099Dr#24zXcv}
+      - PG_DATABASE=${PG_DATABASE:-nexus_tv}
+      - PORT=3002
+      - MEDIA_DIR=/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3002/api/status || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - tv_network
+
+  frontend:
+    container_name: tv-frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${HOST_WEB_PORT:-28080}:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - tv_network
+
+volumes:
+  tv_pgdata:
+    driver: local
+
+networks:
+  tv_network:
+    driver: bridge
