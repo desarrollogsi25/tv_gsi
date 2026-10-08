@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { io } from 'socket.io-client';
 import axios from 'axios';
+import { showConfirmation } from './Toast';
 import './TVPlayer.css';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
@@ -463,13 +464,18 @@ export default function TVPlayer() {
     };
 
     const handleUnlink = () => {
-        if (window.confirm('¿Desvincular esta pantalla? Volverá al estado de espera para asignación remota.')) {
-            localStorage.removeItem('tv_uuid');
-            setTvUuid('');
-            setIsRegistered(false);
-            setPlaylist([]);
-            window.location.reload();
-        }
+        showConfirmation({
+            title: 'Desvincular Pantalla',
+            message: '¿Desvincular esta pantalla? Volverá al estado de espera para asignación remota.',
+            confirmText: 'Desvincular',
+            onAccept: () => {
+                localStorage.removeItem('tv_uuid');
+                setTvUuid('');
+                setIsRegistered(false);
+                setPlaylist([]);
+                window.location.reload();
+            }
+        });
     };
 
     const currentItem = playlist[currentIndex];

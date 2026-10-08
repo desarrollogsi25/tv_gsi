@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import TVPlayer from './components/TVPlayer';
 import Admin from './components/Admin';
 import Login from './components/Login';
+import ToastContainer from './components/Toast';
 import './api'; // Asegurar inicialización de interceptores de Axios
 import './App.css';
 
@@ -24,6 +25,7 @@ function App() {
     return (
         <BrowserRouter>
             <div className="app-container">
+                <ToastContainer />
                 <Routes>
                     {/* Redirigir raíz a /tv */}
                     <Route path="/" element={<Navigate to="/tv" replace />} />
