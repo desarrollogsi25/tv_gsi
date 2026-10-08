@@ -408,6 +408,13 @@ export default function TVPlayer() {
         setTimeout(handleNext, 2000);
     };
 
+    const handleImageError = () => {
+        console.warn(`[TVPlayer] Error cargando imagen en índice ${currentIndex}. Aplicando backoff de 2s...`);
+        setTimeout(() => {
+            handleNext();
+        }, 2000);
+    };
+
     // Temporizador para imágenes o URLs estáticas
     useEffect(() => {
         if (temporaryContent) return; // Si hay override temporal, no avanzar playlist
@@ -647,7 +654,7 @@ export default function TVPlayer() {
                             className="tv-media-element tv-image-player"
                             src={currentItem.source_url.startsWith('http') ? currentItem.source_url : `${API_BASE}${currentItem.source_url}`}
                             alt={currentItem.title}
-                            onError={handleNext}
+                            onError={handleImageError}
                         />
                     )}
 
