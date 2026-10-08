@@ -38,6 +38,8 @@ export default function TVPlayer() {
     // Contenido Temporal en Vivo (Override de Playlist)
     const [temporaryContent, setTemporaryContent] = useState(null);
     const temporaryContentRef = useRef(null);
+    const [isPaused, setIsPaused] = useState(false);
+    const isPausedRef = useRef(false);
 
     useEffect(() => {
         temporaryContentRef.current = temporaryContent;
@@ -49,16 +51,76 @@ export default function TVPlayer() {
 
     const timerRef = useRef(null);
     const tempTimerRef = useRef(null);
+    const timerDeadlineRef = useRef(null);
+    const timerRemainingRef = useRef(null);
+    const tempTimerDeadlineRef = useRef(null);
+    const tempTimerRemainingRef = useRef(null);
+    const timerItemKeyRef = useRef(null);
     const videoRef = useRef(null);
     const tempVideoRef = useRef(null);
     const audioCtxRef = useRef(null);
     const isAudioUnlockedRef = useRef(isAudioUnlocked);
     const volumeLevelRef = useRef(volumeLevel);
 
+    const pausePlayback = () => {
+        if (isPausedRef.current) return;
+        isPausedRef.current = true;
+        setIsPaused(true);
+        if (timerRef.current) {
+            timerRemainingRef.current = Math.max(0, timerDeadlineRef.current - Date.now());
+            clearTimeout(timerRef.current);
+            timerRef.current = null;
+            timerDeadlineRef.current = null;
+        }
+        if (tempTimerRef.current) {
+            tempTimerRemainingRef.current = Math.max(0, tempTimerDeadlineRef.current - Date.now());
+            clearTimeout(tempTimerRef.current);
+            tempTimerRef.current = null;
+            tempTimerDeadlineRef.current = null;
+        }
+        videoRef.current?.pause();
+        tempVideoRef.current?.pause();
+    };
+
+    const resumePlayback = () => {
+        if (!isPausedRef.current) return;
+        isPausedRef.current = false;
+        setIsPaused(false);
+        videoRef.current?.play().catch(() => {});
+        tempVideoRef.current?.play().catch(() => {});
+        const content = temporaryContentRef.current;
+        if (content?.duration_seconds > 0 && !tempTimerRef.current) {
+            const duration = tempTimerRemainingRef.current ?? content.duration_seconds * 1000;
+            tempTimerDeadlineRef.current = Date.now() + duration;
+            tempTimerRef.current = setTimeout(() => {
+                tempTimerRef.current = null;
+                tempTimerDeadlineRef.current = null;
+                tempTimerRemainingRef.current = null;
+                setTemporaryContent(null);
+            }, duration);
+        }
+    };
+
+    const getMediaKind = (item) => {
+        const url = item?.source_url || '';
+        const path = url.split(/[?#]/, 1)[0].toLowerCase();
+        if (item?.content_type === 'video' || /\.(mp4|webm|mkv|mov|ogv)$/.test(path)) return 'video';
+        if (['image', 'img'].includes(item?.content_type) || /\.(avif|gif|jpe?g|png|svg|webp|bmp)$/.test(path)) return 'image';
+        if (getYouTubeEmbed(url) || ['power_bi', 'url', 'iframe', 'external_url'].includes(item?.content_type)) return 'iframe';
+        return 'image';
+    };
+
     useEffect(() => {
         isAudioUnlockedRef.current = isAudioUnlocked;
         volumeLevelRef.current = volumeLevel;
     }, [isAudioUnlocked, volumeLevel]);
+
+    useEffect(() => {
+        [videoRef.current, tempVideoRef.current].filter(Boolean).forEach((video) => {
+            if (isPaused) video.pause();
+            else video.play().catch(() => {});
+        });
+    }, [isPaused, temporaryContent, currentIndex]);
 
     // ─────────────────────────────────────────────────────────
     // Campanilla Sonora Synthesizer (Web Audio API)
@@ -120,14 +182,14 @@ export default function TVPlayer() {
 
         const vol = volumeLevel || 0.8;
 
-        if (videoRef.current) {
+        if (videoRef.current && !isPausedRef.current) {
             videoRef.current.muted = false;
             videoRef.current.volume = vol;
             videoRef.current.play().catch((err) => {
                 console.warn('Aviso: Reproducción con audio pendiente de permiso del navegador:', err.message);
             });
         }
-        if (tempVideoRef.current) {
+        if (tempVideoRef.current && !isPausedRef.current) {
             tempVideoRef.current.muted = false;
             tempVideoRef.current.volume = vol;
             tempVideoRef.current.play().catch((err) => {
@@ -258,11 +320,9 @@ export default function TVPlayer() {
             } else if (command === 'next') {
                 handleNext();
             } else if (command === 'pause') {
-                if (videoRef.current) videoRef.current.pause();
-                if (tempVideoRef.current) tempVideoRef.current.pause();
-            } else if (command === 'play') {
-                if (videoRef.current) videoRef.current.play().catch(() => {});
-                if (tempVideoRef.current) tempVideoRef.current.play().catch(() => {});
+                pausePlayback();
+            } else if (command === 'play' || command === 'resume') {
+                resumePlayback();
             } else if (command === 'unmute') {
                 unlockAudio(true);
             } else if (command === 'mute') {
@@ -277,12 +337,12 @@ export default function TVPlayer() {
                 if (vol > 0) {
                     setIsAudioUnlocked(true);
                     localStorage.setItem('tv_audio_unlocked', 'true');
-                    if (videoRef.current) {
+                    if (videoRef.current && !isPausedRef.current) {
                         videoRef.current.volume = vol;
                         videoRef.current.muted = false;
                         videoRef.current.play().catch(() => {});
                     }
-                    if (tempVideoRef.current) {
+                    if (tempVideoRef.current && !isPausedRef.current) {
                         tempVideoRef.current.volume = vol;
                         tempVideoRef.current.muted = false;
                         tempVideoRef.current.play().catch(() => {});
@@ -302,6 +362,8 @@ export default function TVPlayer() {
         controlSocket.on('command:temporary_content', (content) => {
             console.log('🚨 [Live Override] Contenido temporal recibido:', content);
             if (tempTimerRef.current) clearTimeout(tempTimerRef.current);
+            tempTimerRemainingRef.current = null;
+            tempTimerDeadlineRef.current = null;
 
             setTemporaryContent(content);
 
@@ -311,11 +373,17 @@ export default function TVPlayer() {
             }
 
             // Si tiene duración programada, auto-finalizar y reanudar playlist
-            if (content.duration_seconds && content.duration_seconds > 0) {
+            if (content.duration_seconds && content.duration_seconds > 0 && !isPausedRef.current) {
+                const duration = (tempTimerRemainingRef.current ?? content.duration_seconds * 1000);
+                tempTimerRemainingRef.current = duration;
+                tempTimerDeadlineRef.current = Date.now() + duration;
                 tempTimerRef.current = setTimeout(() => {
                     console.log('⏱️ [Live Override] Duración de temporal expirada. Reanudando playlist.');
+                    tempTimerRef.current = null;
+                    tempTimerDeadlineRef.current = null;
+                    tempTimerRemainingRef.current = null;
                     setTemporaryContent(null);
-                }, content.duration_seconds * 1000);
+                }, duration);
             }
         });
 
@@ -323,6 +391,9 @@ export default function TVPlayer() {
         controlSocket.on('command:clear_temporary', () => {
             console.log('⏹️ [Live Override] Quitando contenido temporal, reanudando playlist.');
             if (tempTimerRef.current) clearTimeout(tempTimerRef.current);
+            tempTimerRef.current = null;
+            tempTimerDeadlineRef.current = null;
+            tempTimerRemainingRef.current = null;
             setTemporaryContent(null);
         });
 
@@ -330,9 +401,9 @@ export default function TVPlayer() {
         controlSocket.on('command:temporary_action', ({ action, payload }) => {
             console.log(`🎮 [Live Override Action] '${action}':`, payload);
             if (action === 'play') {
-                if (tempVideoRef.current) tempVideoRef.current.play().catch(() => {});
+                resumePlayback();
             } else if (action === 'pause') {
-                if (tempVideoRef.current) tempVideoRef.current.pause();
+                pausePlayback();
             } else if (action === 'unmute') {
                 unlockAudio(true);
             } else if (action === 'mute') {
@@ -386,12 +457,14 @@ export default function TVPlayer() {
     // Transición de Contenido de Playlist Normal
     // ─────────────────────────────────────────────────────────
     const handleNext = () => {
+        if (isPausedRef.current) return;
         if (playlist.length === 0) return;
         setCurrentIndex((prev) => (prev + 1) % playlist.length);
     };
 
     // Bucle continuo y seguro de Video
     const handleVideoEnded = () => {
+        if (isPausedRef.current) return;
         if (playlist.length <= 1) {
             // Rebobinar a 0 y reproducir en bucle infinito
             if (videoRef.current) {
@@ -427,21 +500,38 @@ export default function TVPlayer() {
 
         if (timerRef.current) clearTimeout(timerRef.current);
 
-        const isVideo = currentItem.content_type === 'video' || (currentItem.source_url && currentItem.source_url.match(/\.(mp4|webm|mkv|mov)$/i));
+        const itemKey = `${currentItem.content_id ?? currentItem.id ?? currentIndex}:${currentItem.source_url}`;
+        if (timerItemKeyRef.current !== itemKey) {
+            timerItemKeyRef.current = itemKey;
+            timerRemainingRef.current = null;
+        }
+        const isVideo = getMediaKind(currentItem) === 'video';
 
-        if (!isVideo) {
-            const duration = (currentItem.duration_seconds || 15) * 1000;
-            timerRef.current = setTimeout(handleNext, duration);
+        if (!isVideo && !isPaused) {
+            const duration = (timerRemainingRef.current ?? (currentItem.duration_seconds || 15) * 1000);
+            timerDeadlineRef.current = Date.now() + duration;
+            timerRef.current = setTimeout(() => {
+                timerRef.current = null;
+                timerDeadlineRef.current = null;
+                timerRemainingRef.current = null;
+                handleNext();
+            }, duration);
         }
 
         return () => {
-            if (timerRef.current) clearTimeout(timerRef.current);
+            if (timerRef.current) {
+                timerRemainingRef.current = Math.max(0, timerDeadlineRef.current - Date.now());
+                clearTimeout(timerRef.current);
+                timerRef.current = null;
+                timerDeadlineRef.current = null;
+            }
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [currentIndex, playlist, temporaryContent]);
+    }, [currentIndex, playlist, temporaryContent, isPaused]);
 
     // Bucle continuo para el video del Contenido Temporal
     const handleTempVideoEnded = () => {
+        if (isPausedRef.current) return;
         if (tempVideoRef.current) {
             tempVideoRef.current.currentTime = 0;
             tempVideoRef.current.play().catch(() => {});
@@ -584,15 +674,15 @@ export default function TVPlayer() {
                     </div>
 
                     {/* Video Temporal */}
-                    {(temporaryContent.content_type === 'video' || temporaryContent.source_url?.match(/\.(mp4|webm|mov)$/i)) && (
+                    {getMediaKind(temporaryContent) === 'video' && (
                         <video
                             ref={tempVideoRef}
                             className="tv-media-element tv-video-player"
                             src={temporaryContent.source_url.startsWith('http') ? temporaryContent.source_url : `${API_BASE}${temporaryContent.source_url}`}
-                            autoPlay
+                            autoPlay={!isPaused}
                             playsInline
                             loop={temporaryContent.loop !== false}
-                            muted={temporaryContent.muted === false ? false : !isAudioUnlocked}
+                            muted
                             onLoadedMetadata={(e) => {
                                 const isMuted = temporaryContent.muted === false ? false : !isAudioUnlocked;
                                 e.currentTarget.muted = isMuted;
@@ -604,7 +694,7 @@ export default function TVPlayer() {
                     )}
 
                     {/* Imagen Temporal */}
-                    {temporaryContent.content_type === 'image' && (
+                    {getMediaKind(temporaryContent) === 'image' && (
                         <img
                             className="tv-media-element tv-image-player"
                             src={temporaryContent.source_url.startsWith('http') ? temporaryContent.source_url : `${API_BASE}${temporaryContent.source_url}`}
@@ -623,7 +713,7 @@ export default function TVPlayer() {
                     )}
 
                     {/* Iframe / PowerBI Temporal */}
-                    {!getYouTubeEmbed(temporaryContent.source_url) && (temporaryContent.content_type === 'power_bi' || temporaryContent.content_type === 'url') && (
+                    {!getYouTubeEmbed(temporaryContent.source_url) && getMediaKind(temporaryContent) === 'iframe' && (
                         <iframe
                             className="tv-media-element tv-iframe-player"
                             src={temporaryContent.source_url}
@@ -638,15 +728,15 @@ export default function TVPlayer() {
                    ───────────────────────────────────────────────────────── */
                 <>
                     {/* Video de Playlist en Bucle Infinito Seguro */}
-                    {(currentItem.content_type === 'video' || currentItem.source_url?.match(/\.(mp4|webm)$/i)) && (
+                    {getMediaKind(currentItem) === 'video' && (
                         <video
                             ref={videoRef}
                             className="tv-media-element tv-video-player"
                             src={currentItem.source_url.startsWith('http') ? currentItem.source_url : `${API_BASE}${currentItem.source_url}`}
-                            autoPlay
+                            autoPlay={!isPaused}
                             playsInline
                             loop={playlist.length <= 1}
-                            muted={!isAudioUnlocked}
+                            muted
                             onLoadedMetadata={(e) => {
                                 e.currentTarget.muted = !isAudioUnlocked;
                                 e.currentTarget.volume = volumeLevel;
@@ -657,7 +747,7 @@ export default function TVPlayer() {
                     )}
 
                     {/* Imagen de Playlist */}
-                    {currentItem.content_type === 'image' && (
+                    {getMediaKind(currentItem) === 'image' && (
                         <img
                             className="tv-media-element tv-image-player"
                             src={currentItem.source_url.startsWith('http') ? currentItem.source_url : `${API_BASE}${currentItem.source_url}`}
@@ -677,7 +767,7 @@ export default function TVPlayer() {
                     )}
 
                     {/* IFrame Genérico (Power BI, URL Web) */}
-                    {!getYouTubeEmbed(currentItem.source_url) && (currentItem.content_type === 'power_bi' || currentItem.content_type === 'url') && (
+                    {!getYouTubeEmbed(currentItem.source_url) && getMediaKind(currentItem) === 'iframe' && (
                         <iframe
                             className="tv-media-element tv-iframe-player"
                             src={currentItem.source_url}
