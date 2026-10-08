@@ -372,6 +372,30 @@ router.get('/playlists/:id', async (req, res) => {
     }
 });
 
+// Función auxiliar para normalizar días de la semana
+const canonicalDayMap = {
+    'lunes': 'lunes',
+    'martes': 'martes',
+    'miercoles': 'miércoles',
+    'miércoles': 'miércoles',
+    'jueves': 'jueves',
+    'viernes': 'viernes',
+    'sabado': 'sábado',
+    'sábado': 'sábado',
+    'domingo': 'domingo'
+};
+
+function normalizeDaysOfWeek(inputDays) {
+    if (!Array.isArray(inputDays) || inputDays.length === 0) {
+        return ['lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'domingo'];
+    }
+    const normalized = inputDays.map(d => {
+        const clean = String(d).trim().toLowerCase();
+        return canonicalDayMap[clean] || clean;
+    });
+    return Array.from(new Set(normalized));
+}
+
 // Asignar contenido a una playlist con horario
 router.post('/playlists/:id/items', async (req, res) => {
     const { id } = req.params;
@@ -381,8 +405,7 @@ router.post('/playlists/:id/items', async (req, res) => {
         return res.status(400).json({ success: false, message: 'content_id, start_time y end_time requeridos.' });
     }
 
-    const defaultDays = ['lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'domingo'];
-    const days = (Array.isArray(days_of_week) && days_of_week.length > 0) ? days_of_week : defaultDays;
+    const days = normalizeDaysOfWeek(days_of_week);
 
     try {
         const query = `
