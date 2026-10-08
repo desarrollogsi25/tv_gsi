@@ -20,6 +20,8 @@ const { initSockets } = require('./src/sockets/index');
 const tvRoutes = require('./src/routes/tv');
 const { router: adminRoutes, setNamespaces } = require('./src/routes/admin');
 const { router: mediaRoutes, mediaDirectory: mediaDirFromRoute } = require('./src/routes/media');
+const authRoutes = require('./src/routes/auth');
+const authMiddleware = require('./src/middlewares/auth');
 
 // Services
 const { initCronJobs } = require('./src/services/cron');
@@ -47,7 +49,14 @@ setNamespaces({ controlNs, waitingScreens, bindWaitingScreen, setTemporaryConten
 // ═══════════════════════════════════════
 // Middleware
 // ═══════════════════════════════════════
-app.use(cors({ origin: '*' }));
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:28080,http://127.0.0.1:28080,http://localhost:23002').split(',');
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('Bloqueado por política CORS de Nexus TV'));
+  },
+  credentials: true
+}));
 app.use(express.json({ limit: '300mb' }));
 app.use(express.urlencoded({ extended: true, limit: '300mb' }));
 
@@ -89,9 +98,10 @@ app.get('/api/status', (req, res) => {
     res.json({ status: 'online', message: 'Nexus TV API v2 is running.', version: '2.0.0' });
 });
 
+app.use('/api/auth', authRoutes);
 app.use('/api/tv', tvRoutes);
-app.use('/api/admin', adminRoutes);
-app.use('/api/tv-content', mediaRoutes);
+app.use('/api/admin', authMiddleware, adminRoutes);
+app.use('/api/tv-content', authMiddleware, mediaRoutes);
 
 // ═══════════════════════════════════════
 // Iniciar servidor

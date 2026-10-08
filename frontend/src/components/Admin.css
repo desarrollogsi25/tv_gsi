@@ -251,6 +251,8 @@ body {
     flex: 1;
     padding: 40px 44px;
     overflow-y: auto;
+    overflow-x: auto;
+    min-width: 0;
 }
 
 .admin-section h2 {
@@ -661,3 +663,85 @@ button:active, .btn-primary:active, .btn-secondary:active {
     color: var(--text-primary);
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
 }
+
+/* ───────────────────────────────────────────────────────── */
+/* Responsive Design & Viewport Adaptation (BUG-003) */
+/* ───────────────────────────────────────────────────────── */
+.nexus-table {
+    min-width: 600px;
+}
+
+@media (max-width: 1024px) {
+    .admin-sidebar {
+        width: 220px;
+    }
+
+    .admin-main {
+        padding: 30px 24px;
+    }
+
+    .admin-topbar {
+        padding: 0 24px;
+    }
+
+    .tv-grid {
+        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+        gap: 20px;
+    }
+}
+
+@media (max-width: 768px) {
+    .admin-layout {
+        flex-direction: column;
+        width: 100%;
+    }
+
+    .admin-sidebar {
+        width: 100%;
+        min-height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border-sidebar);
+    }
+
+    .sidebar-header {
+        padding: 16px 20px;
+    }
+
+    .sidebar-nav {
+        flex-direction: row;
+        flex-wrap: wrap;
+        padding: 8px 12px;
+        gap: 4px;
+    }
+
+    .sidebar-nav a {
+        padding: 8px 12px;
+        font-size: 0.825rem;
+    }
+
+    .sidebar-footer {
+        display: none;
+    }
+
+    .admin-container {
+        height: auto;
+        min-height: calc(100vh - 120px);
+    }
+
+    .admin-topbar {
+        height: auto;
+        padding: 12px 16px;
+        flex-wrap: wrap;
+        gap: 10px;
+    }
+
+    .admin-main {
+        padding: 20px 16px;
+        overflow-x: auto;
+    }
+
+    .tv-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
