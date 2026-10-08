@@ -373,7 +373,7 @@ export default function BroadcastPanel() {
                                     <div className="dropzone-subtitle">
                                         {isUploading
                                             ? 'Extrayendo metadatos y duración automáticamente...'
-                                            : 'o haz clic aquí para seleccionar desde tu computadora (MP4, WebM, JPG, PNG — hasta 300MB)'}
+                                            : 'o haz clic aquí para seleccionar desde tu computadora (MP4, WebM, JPG, PNG — hasta 500MB)'}
                                     </div>
                                 </div>
 

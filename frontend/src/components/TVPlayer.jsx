@@ -11,6 +11,7 @@ export default function TVPlayer() {
     const [screenName, setScreenName] = useState('');
     const [screenLocation, setScreenLocation] = useState('');
     const [isRegistered, setIsRegistered] = useState(false);
+    const [isRejected, setIsRejected] = useState(false);
 
     // Audio Autoplay & Unlock State (Persistente en localStorage)
     const [isAudioUnlocked, setIsAudioUnlocked] = useState(() => {
@@ -33,6 +34,7 @@ export default function TVPlayer() {
     // Playlist State
     const [playlist, setPlaylist] = useState([]);
     const [currentIndex, setCurrentIndex] = useState(0);
+    const [playbackCycle, setPlaybackCycle] = useState(0);
     const [currentTimeStr, setCurrentTimeStr] = useState('');
 
     // Contenido Temporal en Vivo (Override de Playlist)
@@ -58,6 +60,8 @@ export default function TVPlayer() {
     const timerItemKeyRef = useRef(null);
     const videoRef = useRef(null);
     const tempVideoRef = useRef(null);
+    const iframeRef = useRef(null);
+    const tempIframeRef = useRef(null);
     const audioCtxRef = useRef(null);
     const isAudioUnlockedRef = useRef(isAudioUnlocked);
     const volumeLevelRef = useRef(volumeLevel);
@@ -80,6 +84,9 @@ export default function TVPlayer() {
         }
         videoRef.current?.pause();
         tempVideoRef.current?.pause();
+        [iframeRef.current, tempIframeRef.current].forEach((frame) => frame?.contentWindow?.postMessage(
+            JSON.stringify({ event: 'command', func: 'pauseVideo', args: '' }), '*'
+        ));
     };
 
     const resumePlayback = () => {
@@ -88,6 +95,9 @@ export default function TVPlayer() {
         setIsPaused(false);
         videoRef.current?.play().catch(() => {});
         tempVideoRef.current?.play().catch(() => {});
+        [iframeRef.current, tempIframeRef.current].forEach((frame) => frame?.contentWindow?.postMessage(
+            JSON.stringify({ event: 'command', func: 'playVideo', args: '' }), '*'
+        ));
         const content = temporaryContentRef.current;
         if (content?.duration_seconds > 0 && !tempTimerRef.current) {
             const duration = tempTimerRemainingRef.current ?? content.duration_seconds * 1000;
@@ -104,9 +114,9 @@ export default function TVPlayer() {
     const getMediaKind = (item) => {
         const url = item?.source_url || '';
         const path = url.split(/[?#]/, 1)[0].toLowerCase();
-        if (item?.content_type === 'video' || /\.(mp4|webm|mkv|mov|ogv)$/.test(path)) return 'video';
+        if (item?.content_type === 'video' || /\.(mp4|webm|mkv|mov|ogv|m4v|mpeg|mpg|3gp)$/.test(path)) return 'video';
         if (['image', 'img'].includes(item?.content_type) || /\.(avif|gif|jpe?g|png|svg|webp|bmp)$/.test(path)) return 'image';
-        if (getYouTubeEmbed(url) || ['power_bi', 'url', 'iframe', 'external_url'].includes(item?.content_type)) return 'iframe';
+        if (getYouTubeEmbed(url) || ['power_bi', 'url', 'iframe', 'external_url', 'youtube'].includes(item?.content_type)) return 'iframe';
         return 'image';
     };
 
@@ -141,8 +151,8 @@ export default function TVPlayer() {
             const gain = ctx.createGain();
 
             osc.type = 'sine';
-            osc.frequency.setValueAtTime(587.33, now); // D5
-            osc.frequency.exponentialRampToValueAtTime(880, now + 0.15); // A5
+            osc.frequency.setValueAtTime(880, now); // A5
+            osc.frequency.exponentialRampToValueAtTime(440, now + 0.15); // A4
 
             const vol = volumeLevel || 0.8;
             gain.gain.setValueAtTime(0.001, now);
@@ -301,6 +311,12 @@ export default function TVPlayer() {
             reconnectionDelay: 1000
         });
 
+        controlSocket.on('connect', () => {
+            if (isRegistered && tvUuid) controlSocket.emit('register_screen', { tv_uuid: tvUuid });
+        });
+
+        controlSocket.on('command:rejected', () => setIsRejected(true));
+
         // 1. Asignación remota de usuario/perfil desde el Admin
         controlSocket.on('command:assign_profile', (profile) => {
             console.log('🎉 Perfil asignado remotamente desde el Admin:', profile);
@@ -315,9 +331,15 @@ export default function TVPlayer() {
         // 2. Comandos generales de control remoto
         controlSocket.on('command:execute', ({ command, payload }) => {
             console.log(`🎮 Comando recibido: ${command}`, payload);
-            if (command === 'reload' || command === 'playlist_changed' || command === 'approved') {
+            if (command === 'unlink') {
+                localStorage.removeItem('tv_uuid');
+                setTvUuid('');
+                setIsRegistered(false);
+                setPlaylist([]);
+                setIsRejected(false);
+            } else if (command === 'reload' || command === 'playlist_changed' || command === 'approved') {
                 window.location.reload();
-            } else if (command === 'next') {
+            } else if (command === 'next' || command === 'skip') {
                 handleNext();
             } else if (command === 'pause') {
                 pausePlayback();
@@ -330,20 +352,20 @@ export default function TVPlayer() {
                 localStorage.setItem('tv_audio_unlocked', 'false');
                 if (videoRef.current) videoRef.current.muted = true;
                 if (tempVideoRef.current) tempVideoRef.current.muted = true;
-            } else if (command === 'volume') {
-                const vol = Math.max(0, Math.min(1, (payload?.level !== undefined ? payload.level : 80) / 100));
+            } else if (command === 'volume' || command === 'set_volume') {
+                const vol = Math.max(0, Math.min(1, payload?.volume !== undefined ? payload.volume : (payload?.level ?? 80) / 100));
                 setVolumeLevel(vol);
                 localStorage.setItem('tv_volume', String(vol));
+                if (videoRef.current) videoRef.current.volume = vol;
+                if (tempVideoRef.current) tempVideoRef.current.volume = vol;
                 if (vol > 0) {
                     setIsAudioUnlocked(true);
                     localStorage.setItem('tv_audio_unlocked', 'true');
                     if (videoRef.current && !isPausedRef.current) {
-                        videoRef.current.volume = vol;
                         videoRef.current.muted = false;
                         videoRef.current.play().catch(() => {});
                     }
                     if (tempVideoRef.current && !isPausedRef.current) {
-                        tempVideoRef.current.volume = vol;
                         tempVideoRef.current.muted = false;
                         tempVideoRef.current.play().catch(() => {});
                     }
@@ -353,7 +375,7 @@ export default function TVPlayer() {
                     if (videoRef.current) videoRef.current.muted = true;
                     if (tempVideoRef.current) tempVideoRef.current.muted = true;
                 }
-            } else if (command === 'chime' || command === 'test_sound') {
+            } else if (command === 'chime' || command === 'test_sound' || command === 'play_sound') {
                 playChime();
             }
         });
@@ -400,7 +422,7 @@ export default function TVPlayer() {
         // 5. Acciones remotas específicas sobre el contenido temporal
         controlSocket.on('command:temporary_action', ({ action, payload }) => {
             console.log(`🎮 [Live Override Action] '${action}':`, payload);
-            if (action === 'play') {
+            if (action === 'play' || action === 'resume') {
                 resumePlayback();
             } else if (action === 'pause') {
                 pausePlayback();
@@ -408,8 +430,8 @@ export default function TVPlayer() {
                 unlockAudio(true);
             } else if (action === 'mute') {
                 if (tempVideoRef.current) tempVideoRef.current.muted = true;
-            } else if (action === 'volume') {
-                const vol = Math.max(0, Math.min(1, (payload?.level !== undefined ? payload.level : 80) / 100));
+            } else if (action === 'volume' || action === 'set_volume') {
+                const vol = Math.max(0, Math.min(1, payload?.volume !== undefined ? payload.volume : (payload?.level ?? 80) / 100));
                 setVolumeLevel(vol);
                 localStorage.setItem('tv_volume', String(vol));
                 if (tempVideoRef.current) {
@@ -422,7 +444,7 @@ export default function TVPlayer() {
                         tempVideoRef.current.muted = true;
                     }
                 }
-            } else if (action === 'chime' || action === 'test_sound') {
+            } else if (action === 'chime' || action === 'test_sound' || action === 'play_sound') {
                 playChime();
             }
         });
@@ -459,6 +481,11 @@ export default function TVPlayer() {
     const handleNext = () => {
         if (isPausedRef.current) return;
         if (playlist.length === 0) return;
+        if (timerRef.current) clearTimeout(timerRef.current);
+        timerRef.current = null;
+        timerDeadlineRef.current = null;
+        timerRemainingRef.current = null;
+        setPlaybackCycle((cycle) => cycle + 1);
         setCurrentIndex((prev) => (prev + 1) % playlist.length);
     };
 
@@ -527,7 +554,7 @@ export default function TVPlayer() {
             }
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [currentIndex, playlist, temporaryContent, isPaused]);
+    }, [currentIndex, playlist, temporaryContent, isPaused, playbackCycle]);
 
     // Bucle continuo para el video del Contenido Temporal
     const handleTempVideoEnded = () => {
@@ -542,7 +569,7 @@ export default function TVPlayer() {
     const getYouTubeEmbed = (url) => {
         if (!url) return null;
         const match = url.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|shorts\/))([\w-]{11})/);
-        return match ? `https://www.youtube.com/embed/${match[1]}?autoplay=1&mute=${isAudioUnlocked ? 0 : 1}&controls=0&loop=1` : null;
+        return match ? `https://www.youtube.com/embed/${match[1]}?autoplay=1&mute=${isAudioUnlocked ? 0 : 1}&controls=0&loop=1&playlist=${match[1]}&enablejsapi=1` : null;
     };
 
     const handleManualBind = (e) => {
@@ -582,7 +609,9 @@ export default function TVPlayer() {
                     <div className="tv-waiting-logo">📡</div>
                     <h1 className="tv-waiting-title">Pantalla Detectada en la Red</h1>
                     <p className="tv-waiting-subtitle">
-                        Esta pantalla se encuentra en línea y lista para ser vinculada automáticamente desde la Consola de Administración.
+                        {isRejected
+                            ? 'La solicitud de vinculación fue rechazada. Contacta al administrador para iniciar una nueva sesión.'
+                            : 'Esta pantalla se encuentra en línea y lista para ser vinculada automáticamente desde la Consola de Administración.'}
                     </p>
 
                     <div style={{
@@ -705,6 +734,7 @@ export default function TVPlayer() {
                     {/* YouTube Temporal */}
                     {getYouTubeEmbed(temporaryContent.source_url) && (
                         <iframe
+                            ref={tempIframeRef}
                             className="tv-media-element tv-iframe-player"
                             src={getYouTubeEmbed(temporaryContent.source_url)}
                             title={temporaryContent.title}
@@ -715,9 +745,11 @@ export default function TVPlayer() {
                     {/* Iframe / PowerBI Temporal */}
                     {!getYouTubeEmbed(temporaryContent.source_url) && getMediaKind(temporaryContent) === 'iframe' && (
                         <iframe
+                            ref={tempIframeRef}
                             className="tv-media-element tv-iframe-player"
                             src={temporaryContent.source_url}
                             title={temporaryContent.title}
+                            onLoad={(e) => { if (isPaused) e.currentTarget.contentWindow?.postMessage(JSON.stringify({ event: 'command', func: 'pauseVideo', args: '' }), '*'); }}
                             allowFullScreen
                         />
                     )}
@@ -759,9 +791,11 @@ export default function TVPlayer() {
                     {/* YouTube */}
                     {getYouTubeEmbed(currentItem.source_url) && (
                         <iframe
+                            ref={iframeRef}
                             className="tv-media-element tv-iframe-player"
                             src={getYouTubeEmbed(currentItem.source_url)}
                             title={currentItem.title}
+                            onLoad={(e) => { if (isPaused) e.currentTarget.contentWindow?.postMessage(JSON.stringify({ event: 'command', func: 'pauseVideo', args: '' }), '*'); }}
                             allow="autoplay; encrypted-media"
                         />
                     )}
@@ -769,6 +803,7 @@ export default function TVPlayer() {
                     {/* IFrame Genérico (Power BI, URL Web) */}
                     {!getYouTubeEmbed(currentItem.source_url) && getMediaKind(currentItem) === 'iframe' && (
                         <iframe
+                            ref={iframeRef}
                             className="tv-media-element tv-iframe-player"
                             src={currentItem.source_url}
                             title={currentItem.title}

@@ -28,16 +28,21 @@ jobs:
       - name: Install Backend Dependencies
         run: npm install
 
+      - name: Audit Production Dependencies
+        run: npm audit --omit=dev --audit-level=high
+
       - name: Verify Core Syntax
         run: |
           node --check nx_tv.js
           node --check src/config/db.js
+          node --check src/config/jwt.js
           node --check src/middlewares/auth.js
           node --check src/routes/auth.js
           node --check src/routes/tv.js
           node --check src/routes/admin.js
           node --check src/routes/media.js
           node --check src/sockets/index.js
+          node --check scripts/e2e_full_audit.cjs
 
       - name: Run Unit Tests
         run: npm test
@@ -60,6 +65,10 @@ jobs:
         working-directory: ./frontend
         run: npm install
 
+      - name: Audit Frontend Dependencies
+        working-directory: ./frontend
+        run: npm audit --audit-level=high
+
       - name: Run Linter (oxlint)
         working-directory: ./frontend
         run: npx oxlint
@@ -76,4 +85,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Validate Compose File
+        env:
+          PG_PASSWORD: ci-validation-only
+          JWT_SECRET: ci-validation-only-random-secret
         run: docker compose -f docker-compose.yml config --quiet

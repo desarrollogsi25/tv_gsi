@@ -75,6 +75,7 @@ router.get('/:tv_uuid/playlist', async (req, res) => {
                 c.source_type, 
                 c.content_type, 
                 c.duration_seconds,
+                pc.position,
                 pc.start_time, 
                 pc.end_time, 
                 pc.days_of_week
@@ -100,7 +101,7 @@ router.get('/:tv_uuid/playlist', async (req, res) => {
                   WHEN 7 THEN ARRAY['domingo']
                 END
               )::text[]
-            ORDER BY pc.start_time ASC, c.id ASC;
+            ORDER BY pc.position ASC, pc.start_time ASC NULLS FIRST, c.id ASC;
         `;
 
         const result = await pool.query(query, [tv_uuid]);

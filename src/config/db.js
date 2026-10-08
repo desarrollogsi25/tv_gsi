@@ -7,13 +7,15 @@ const path = require('path');
 const fs = require('fs');
 
 const port = parseInt(process.env.PORT, 10) || 3002;
+const databasePassword = process.env.PG_PASSWORD || (process.env.NODE_ENV === 'production' ? null : 'Gs1$2099Dr#24zXcv');
+if (!databasePassword) throw new Error('PG_PASSWORD must be set when NODE_ENV=production.');
 
 // Pool de conexiones PostgreSQL
 const pool = new Pool({
     host: process.env.PG_HOST || '127.0.0.1',
     port: parseInt(process.env.PG_PORT, 10) || 5432,
     user: process.env.PG_USER || 'tv',
-    password: process.env.PG_PASSWORD || 'Gs1$2099Dr#24zXcv',
+    password: databasePassword,
     database: process.env.PG_DATABASE || 'nexus_tv',
     max: 20,
     idleTimeoutMillis: 30000,

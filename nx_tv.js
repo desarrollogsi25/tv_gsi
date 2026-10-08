@@ -31,12 +31,20 @@ const { initCronJobs } = require('./src/services/cron');
 // ═══════════════════════════════════════
 const app = express();
 const server = http.createServer(app);
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:28080,http://127.0.0.1:28080')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
 
 // Socket.IO con soporte dual-hub
 const io = new Server(server, {
     cors: {
-        origin: '*',
-        methods: ['GET', 'POST']
+        origin: (origin, callback) => {
+            if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+            return callback(new Error('Bloqueado por política CORS de Nexus TV'));
+        },
+        methods: ['GET', 'POST'],
+        credentials: true
     }
 });
 
@@ -49,7 +57,6 @@ setNamespaces({ controlNs, waitingScreens, bindWaitingScreen, setTemporaryConten
 // ═══════════════════════════════════════
 // Middleware
 // ═══════════════════════════════════════
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:28080,http://127.0.0.1:28080,http://localhost:23002').split(',');
 app.use(cors({
   origin: (origin, callback) => {
     if (!origin || allowedOrigins.includes(origin)) return callback(null, true);

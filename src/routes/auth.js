@@ -5,7 +5,7 @@ const jwt = require('jsonwebtoken');
 const { pool } = require('../config/db');
 const authMiddleware = require('../middlewares/auth');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'nexus-tv-jwt-secret-key-2026';
+const JWT_SECRET = require('../config/jwt');
 
 // Iniciar sesión (Login)
 router.post('/login', async (req, res) => {
