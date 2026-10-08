@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { API_URL } from '../Admin';
+import { showToast, showConfirmation } from '../Toast';
 
 export default function ContentManager() {
     const [activeTab, setActiveTab] = useState('library'); // 'library' | 'upload' | 'external' | 'playlists'
@@ -68,7 +69,7 @@ export default function ContentManager() {
     // Subir Archivo
     const handleUploadSubmit = async (e) => {
         e.preventDefault();
-        if (!fileToUpload) return alert('Por favor selecciona un archivo.');
+        if (!fileToUpload) return showToast('Por favor selecciona un archivo.', 'warning');
 
         setIsUploading(true);
         const formData = new FormData();
@@ -120,17 +121,26 @@ export default function ContentManager() {
     };
 
     // Eliminar Contenido
-    const handleDeleteContent = async (id, url) => {
-        if (!window.confirm('¿Seguro de eliminar este contenido? Se desvinculará de las playlists.')) return;
-        try {
-            await axios.post(`${API_URL}/api/tv-content/delete`, { content_id: id, fileUrl: url });
-            setMessage('Contenido eliminado.');
-            loadData();
-        } catch (err) {
-            setMessage('Error al eliminar: ' + (err.response?.data?.message || err.message));
-        } finally {
-            setTimeout(() => setMessage(''), 3500);
-        }
+    const handleDeleteContent = (id, url) => {
+        showConfirmation({
+            title: 'Eliminar Contenido',
+            message: '¿Seguro de eliminar este contenido? Se desvinculará de las playlists.',
+            confirmText: 'Eliminar',
+            onAccept: async () => {
+                try {
+                    await axios.post(`${API_URL}/api/tv-content/delete`, { content_id: id, fileUrl: url });
+                    setMessage('Contenido eliminado.');
+                    showToast('Contenido eliminado exitosamente.', 'success');
+                    loadData();
+                } catch (err) {
+                    const errMsg = 'Error al eliminar: ' + (err.response?.data?.message || err.message);
+                    setMessage(errMsg);
+                    showToast(errMsg, 'error');
+                } finally {
+                    setTimeout(() => setMessage(''), 3500);
+                }
+            }
+        });
     };
 
     // Crear Playlist
