@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { API_URL } from '../Admin';
+import { showToast } from '../Toast';
 
 export default function TVRegister() {
     const [waitingScreens, setWaitingScreens] = useState([]);
@@ -40,7 +41,7 @@ export default function TVRegister() {
     const handleBindScreen = async (sessionCode) => {
         const tvUuid = selectedProfileByPin[sessionCode] || (profiles[0] ? profiles[0].tv_uuid : null);
         if (!tvUuid) {
-            return alert('Por favor selecciona un usuario/perfil de pantalla para asignar.');
+            return showToast('Por favor selecciona un usuario/perfil de pantalla para asignar.', 'warning');
         }
 
         try {

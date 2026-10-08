@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import axios from 'axios';
 import { API_URL } from '../Admin';
+import { showToast } from '../Toast';
 
 export default function TVList() {
     const [screens, setScreens] = useState([]);
@@ -37,9 +38,9 @@ export default function TVList() {
             await axios.post(`${API_URL}/api/admin/screens/${uuid}/control`, {
                 command: 'reload'
             });
-            alert('Comando de recarga enviado.');
+            showToast('Comando de recarga enviado exitosamente.', 'success');
         } catch (err) {
-            alert('Error al enviar recarga: ' + (err.response?.data?.message || err.message));
+            showToast('Error al enviar recarga: ' + (err.response?.data?.message || err.message), 'error');
         }
     };
 
