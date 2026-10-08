@@ -25,14 +25,21 @@ pool.on('error', (err) => {
 });
 
 // Directorio de almacenamiento de media
-const defaultMediaDir = process.platform === 'win32'
-    ? path.join(__dirname, '..', '..', 'media')
-    : '/app/media';
+const defaultMediaDir = (process.platform !== 'win32' && fs.existsSync('/app'))
+    ? '/app/media'
+    : path.join(__dirname, '..', '..', 'media');
 
 const mediaDirectory = process.env.MEDIA_DIR || defaultMediaDir;
 
-if (!fs.existsSync(mediaDirectory)) {
-    fs.mkdirSync(mediaDirectory, { recursive: true });
+try {
+    if (!fs.existsSync(mediaDirectory)) {
+        fs.mkdirSync(mediaDirectory, { recursive: true });
+    }
+} catch (err) {
+    // Silently continue in restricted/CI environments without write access to root
+    if (process.env.NODE_ENV !== 'production') {
+        console.warn('⚠️ [Media Dir Warning]: Could not create media directory:', err.message);
+    }
 }
 
 module.exports = {

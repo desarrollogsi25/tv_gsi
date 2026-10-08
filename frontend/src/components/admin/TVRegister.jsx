@@ -7,12 +7,10 @@ export default function TVRegister() {
     const [waitingScreens, setWaitingScreens] = useState([]);
     const [profiles, setProfiles] = useState([]);
     const [selectedProfileByPin, setSelectedProfileByPin] = useState({});
-    const [loading, setLoading] = useState(true);
     const [message, setMessage] = useState('');
 
     const loadData = async () => {
         try {
-            setLoading(true);
             const [waitingRes, profilesRes] = await Promise.all([
                 axios.get(`${API_URL}/api/admin/waiting-screens`),
                 axios.get(`${API_URL}/api/admin/available-profiles`)
@@ -26,8 +24,6 @@ export default function TVRegister() {
             }
         } catch (err) {
             console.error('Error cargando datos de vinculación:', err);
-        } finally {
-            setLoading(false);
         }
     };
 

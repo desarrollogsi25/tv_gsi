@@ -5,6 +5,7 @@
 const express = require('express');
 const router = express.Router();
 const { pool } = require('../config/db');
+const { normalizeDaysOfWeek } = require('../utils/dateHelpers');
 
 let controlNamespace = null;
 let waitingScreensMap = null;
@@ -371,30 +372,6 @@ router.get('/playlists/:id', async (req, res) => {
         res.status(500).json({ success: false, message: 'Error interno del servidor.' });
     }
 });
-
-// Función auxiliar para normalizar días de la semana
-const canonicalDayMap = {
-    'lunes': 'lunes',
-    'martes': 'martes',
-    'miercoles': 'miércoles',
-    'miércoles': 'miércoles',
-    'jueves': 'jueves',
-    'viernes': 'viernes',
-    'sabado': 'sábado',
-    'sábado': 'sábado',
-    'domingo': 'domingo'
-};
-
-function normalizeDaysOfWeek(inputDays) {
-    if (!Array.isArray(inputDays) || inputDays.length === 0) {
-        return ['lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'domingo'];
-    }
-    const normalized = inputDays.map(d => {
-        const clean = String(d).trim().toLowerCase();
-        return canonicalDayMap[clean] || clean;
-    });
-    return Array.from(new Set(normalized));
-}
 
 // Asignar contenido a una playlist con horario
 router.post('/playlists/:id/items', async (req, res) => {

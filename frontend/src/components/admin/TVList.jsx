@@ -7,20 +7,13 @@ import { showToast } from '../Toast';
 export default function TVList() {
     const [screens, setScreens] = useState([]);
     const [loading, setLoading] = useState(true);
-    const [stats, setStats] = useState({ totalScreens: 0, activeScreens: 0, totalPlaylists: 0, totalContent: 0 });
 
     const fetchScreens = async () => {
         try {
             setLoading(true);
-            const [screensRes, statsRes] = await Promise.all([
-                axios.get(`${API_URL}/api/admin/screens`),
-                axios.get(`${API_URL}/api/admin/stats`).catch(() => ({ data: { stats: {} } }))
-            ]);
+            const screensRes = await axios.get(`${API_URL}/api/admin/screens`);
             if (screensRes.data.success) {
                 setScreens(screensRes.data.screens);
-            }
-            if (statsRes.data?.stats) {
-                setStats(statsRes.data.stats);
             }
         } catch (err) {
             console.error('Error fetching screens:', err);
