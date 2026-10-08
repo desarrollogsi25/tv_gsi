@@ -5,7 +5,7 @@
 - **Severidad:** Crítica
 - **Prioridad:** P0
 - **Fecha de Detección:** 2026-10-08
-- **Estado:** Confirmado (Pendiente de Corrección)
+- **Estado:** 🟡 Resuelto en Staging / Pendiente QA
 - **Reportado por:** QA Lead & Senior Software Architect
 
 ---
@@ -83,3 +83,18 @@ Adicionalmente, se encuentra habilitado el middleware `cors({ origin: '*' })`, p
    const allowedOrigins = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : ['http://localhost:28080'];
    app.use(cors({ origin: allowedOrigins, credentials: true }));
    ```
+
+---
+
+### 8. Remediación Implementada (bugfix/NX-003-security-auth)
+1. **Middleware JWT (`src/middlewares/auth.js`):** Valida cabecera `Authorization: Bearer <token>`, decodifica el token e inyecta `req.user`. Retorna `HTTP 401 Unauthorized` si no se suministra token o si expiró/es inválido.
+2. **Router de Autenticación (`src/routes/auth.js`):**
+   - `POST /api/auth/login`: Valida usuario y contraseña con `bcryptjs`, genera token JWT con vigencia de 8 horas.
+   - `GET /api/auth/me`: Endpoint protegido para validar identidad activa.
+3. **Restricción CORS y Protección en `nx_tv.js`:**
+   - Lista blanca de orígenes: `http://localhost:28080,http://127.0.0.1:28080,http://localhost:23002`.
+   - Protección con `authMiddleware` en `/api/admin` y `/api/tv-content`.
+   - Endpoints `/api/tv` y `/media` permanecen públicos para operación de kioskos.
+4. **Verificación:**
+   - Solicitud anónima a `/api/admin/stats` retorna `HTTP 401 Unauthorized`.
+   - Autenticación con `p1_principal` retorna `HTTP 200 OK` con JWT y permite acceso autorizado.
