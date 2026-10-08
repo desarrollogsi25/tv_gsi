@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { normalizeDaysOfWeek } = require('../src/routes/admin');
+const { normalizeDaysOfWeek } = require('../src/utils/dateHelpers');
 
 test('normalizeDaysOfWeek - arreglos con tildes se preservan canónicos', () => {
     const input = ['miércoles', 'sábado'];

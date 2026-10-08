@@ -379,6 +379,7 @@ export default function TVPlayer() {
             if (tempTimerRef.current) clearTimeout(tempTimerRef.current);
             clearInterval(hbInterval);
         };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [tvUuid, isRegistered, sessionPin]);
 
     // ─────────────────────────────────────────────────────────
@@ -436,6 +437,7 @@ export default function TVPlayer() {
         return () => {
             if (timerRef.current) clearTimeout(timerRef.current);
         };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [currentIndex, playlist, temporaryContent]);
 
     // Bucle continuo para el video del Contenido Temporal
