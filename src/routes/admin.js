@@ -439,7 +439,7 @@ router.delete('/playlists/:id/items/:contentId', async (req, res) => {
 // ─────────────────────────────────────────────────────────
 
 // Emitir contenido temporal a una pantalla específica o a todas ('all')
-router.post('/temporary-content', (req, res) => {
+router.post('/temporary-content', async (req, res) => {
     const { target = 'all', content } = req.body;
 
     if (!content || !content.source_url) {
@@ -448,6 +448,17 @@ router.post('/temporary-content', (req, res) => {
 
     if (!setTemporaryContentFn) {
         return res.status(503).json({ success: false, message: 'Servicio de broadcast temporal no disponible.' });
+    }
+
+    if (target !== 'all') {
+        try {
+            const screenCheck = await pool.query('SELECT id, is_active FROM nexus_tv.tv_screens WHERE tv_uuid::text = $1', [target]);
+            if (screenCheck.rows.length === 0) {
+                return res.status(404).json({ success: false, message: 'La pantalla especificada como target no existe.' });
+            }
+        } catch (err) {
+            return res.status(404).json({ success: false, message: 'La pantalla especificada como target no existe.' });
+        }
     }
 
     const payload = {
@@ -470,11 +481,22 @@ router.post('/temporary-content', (req, res) => {
 });
 
 // Finalizar transmisión temporal y reanudar playlist normal
-router.post('/clear-temporary', (req, res) => {
+router.post('/clear-temporary', async (req, res) => {
     const { target = 'all' } = req.body;
 
     if (!clearTemporaryContentFn) {
         return res.status(503).json({ success: false, message: 'Servicio de broadcast temporal no disponible.' });
+    }
+
+    if (target !== 'all') {
+        try {
+            const screenCheck = await pool.query('SELECT id, is_active FROM nexus_tv.tv_screens WHERE tv_uuid::text = $1', [target]);
+            if (screenCheck.rows.length === 0) {
+                return res.status(404).json({ success: false, message: 'La pantalla especificada como target no existe.' });
+            }
+        } catch (err) {
+            return res.status(404).json({ success: false, message: 'La pantalla especificada como target no existe.' });
+        }
     }
 
     clearTemporaryContentFn(target);
