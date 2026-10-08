@@ -4,7 +4,7 @@
 - **Severidad:** Media
 - **Prioridad:** P2
 - **Fecha de Detección:** 2026-10-08
-- **Estado:** 🟡 Resuelto en Staging / Pendiente QA
+- **Estado:** 🟢 Cerrado y Validado en QA
 - **Reportado por:** QA Lead & Senior Software Architect
 
 ---
