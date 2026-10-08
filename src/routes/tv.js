@@ -85,6 +85,10 @@ router.get('/:tv_uuid/playlist', async (req, res) => {
             JOIN nexus_tv.content AS c ON pc.content_id = c.id
             WHERE ts.tv_uuid = $1
               AND ts.is_active = true
+              AND (
+                (pc.start_time IS NULL OR pc.end_time IS NULL)
+                OR (LOCALTIME BETWEEN pc.start_time AND pc.end_time)
+              )
               AND pc.days_of_week @> ARRAY[
                 CASE EXTRACT(ISODOW FROM CURRENT_DATE)
                     WHEN 1 THEN 'lunes'
