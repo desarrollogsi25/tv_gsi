@@ -5,7 +5,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${PG_USER:-tv}
-      POSTGRES_PASSWORD: ${PG_PASSWORD:-Gs1$2099Dr#24zXcv}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?Set PG_PASSWORD in .env}
       POSTGRES_DB: ${PG_DATABASE:-nexus_tv}
     ports:
       - "${HOST_DB_PORT:-25432}:5432"
@@ -32,10 +32,12 @@ services:
       - ./media:/app/media
     environment:
       - NODE_ENV=${NODE_ENV:-production}
+      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:28080,http://127.0.0.1:28080}
       - PG_HOST=db
       - PG_PORT=5432
       - PG_USER=${PG_USER:-tv}
-      - PG_PASSWORD=${PG_PASSWORD:-Gs1$2099Dr#24zXcv}
+      - PG_PASSWORD=${PG_PASSWORD:?Set PG_PASSWORD in .env}
       - PG_DATABASE=${PG_DATABASE:-nexus_tv}
       - PORT=3002
       - MEDIA_DIR=/app/media

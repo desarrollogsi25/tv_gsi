@@ -10,4 +10,5 @@ media/*
 Thumbs.db
 scratch/
 *.cjs
+!scripts/e2e_full_audit.cjs
 *.dump

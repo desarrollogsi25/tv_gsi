@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import axios from 'axios';
 import { API_URL } from '../Admin';
-import { showToast } from '../Toast';
+import { showToast, showConfirmation } from '../Toast';
 
 export default function TVList() {
     const [screens, setScreens] = useState([]);
@@ -35,6 +35,28 @@ export default function TVList() {
         } catch (err) {
             showToast('Error al enviar recarga: ' + (err.response?.data?.message || err.message), 'error');
         }
+    };
+
+    const handleScreenAction = (screen, action) => {
+        const isDelete = action === 'delete';
+        showConfirmation({
+            title: isDelete ? 'Eliminar pantalla' : 'Desvincular pantalla',
+            message: isDelete
+                ? `¿Eliminar el perfil de ${screen.name} y su asignación de playlist?`
+                : `¿Desvincular ${screen.name}? El perfil se conservará y podrá vincularse de nuevo.`,
+            confirmText: isDelete ? 'Eliminar' : 'Desvincular',
+            onAccept: async () => {
+                try {
+                    const route = `${API_URL}/api/admin/screens/${screen.tv_uuid}`;
+                    if (isDelete) await axios.delete(route);
+                    else await axios.post(`${route}/unlink`);
+                    showToast(isDelete ? 'Pantalla eliminada.' : 'Pantalla desvinculada.', 'success');
+                    fetchScreens();
+                } catch (err) {
+                    showToast('Error: ' + (err.response?.data?.message || err.message), 'error');
+                }
+            }
+        });
     };
 
     return (
@@ -84,6 +106,12 @@ export default function TVList() {
                                         </Link>
                                         <button className="btn-secondary" onClick={() => handleQuickReload(tv.tv_uuid)}>
                                             🔄 Reiniciar
+                                        </button>
+                                        <button className="btn-secondary" onClick={() => handleScreenAction(tv, 'unlink')}>
+                                            🔗 Desvincular
+                                        </button>
+                                        <button className="btn-danger" onClick={() => handleScreenAction(tv, 'delete')}>
+                                            🗑️ Eliminar
                                         </button>
                                     </div>
                                 </div>

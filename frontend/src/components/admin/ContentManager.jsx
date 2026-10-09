@@ -29,6 +29,9 @@ export default function ContentManager() {
     const [addItemContentId, setAddItemContentId] = useState('');
     const [addStartTime, setAddStartTime] = useState('06:00');
     const [addEndTime, setAddEndTime] = useState('22:00');
+    const [isAlwaysOn, setIsAlwaysOn] = useState(false);
+    const [selectedDays, setSelectedDays] = useState(['lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'domingo']);
+    const [editPlaylistName, setEditPlaylistName] = useState('');
 
     const [message, setMessage] = useState('');
 
@@ -61,7 +64,10 @@ export default function ContentManager() {
         if (!selectedPlaylistId) return;
         axios.get(`${API_URL}/api/admin/playlists/${selectedPlaylistId}`)
             .then((res) => {
-                if (res.data.success) setPlaylistDetails(res.data);
+                if (res.data.success) {
+                    setPlaylistDetails(res.data);
+                    setEditPlaylistName(res.data.playlist.name);
+                }
             })
             .catch((err) => console.error('Error cargando playlist:', err));
     }, [selectedPlaylistId]);
@@ -151,6 +157,8 @@ export default function ContentManager() {
             const res = await axios.post(`${API_URL}/api/admin/playlists`, { name: newPlaylistName });
             if (res.data.success) {
                 setMessage(`Playlist '${newPlaylistName}' creada.`);
+                setSelectedPlaylistId(res.data.playlist.id);
+                setEditPlaylistName(res.data.playlist.name);
                 setNewPlaylistName('');
                 loadData();
             }
@@ -163,12 +171,14 @@ export default function ContentManager() {
     const handleAddContentToPlaylist = async (e) => {
         e.preventDefault();
         if (!selectedPlaylistId || !addItemContentId) return;
+        if (selectedDays.length === 0) return showToast('Selecciona al menos un día de emisión.', 'warning');
 
         try {
             await axios.post(`${API_URL}/api/admin/playlists/${selectedPlaylistId}/items`, {
                 content_id: parseInt(addItemContentId, 10),
-                start_time: addStartTime,
-                end_time: addEndTime
+                start_time: isAlwaysOn ? null : addStartTime,
+                end_time: isAlwaysOn ? null : addEndTime,
+                days_of_week: selectedDays
             });
             setMessage('Contenido asignado a la playlist.');
             // Recargar detalles
@@ -189,6 +199,52 @@ export default function ContentManager() {
             if (res.data.success) setPlaylistDetails(res.data);
         } catch (err) {
             setMessage('Error al retirar contenido: ' + (err.response?.data?.message || err.message));
+        }
+    };
+
+    const handleRenamePlaylist = async (e) => {
+        e.preventDefault();
+        try {
+            await axios.put(`${API_URL}/api/admin/playlists/${selectedPlaylistId}`, { name: editPlaylistName });
+            showToast('Nombre de playlist actualizado.', 'success');
+            await loadData();
+            const res = await axios.get(`${API_URL}/api/admin/playlists/${selectedPlaylistId}`);
+            if (res.data.success) setPlaylistDetails(res.data);
+        } catch (err) {
+            showToast('Error al renombrar: ' + (err.response?.data?.message || err.message), 'error');
+        }
+    };
+
+    const handleDeletePlaylist = () => showConfirmation({
+        title: 'Eliminar playlist',
+        message: `¿Eliminar ${playlistDetails?.playlist?.name || 'esta playlist'} y sus programaciones?`,
+        confirmText: 'Eliminar',
+        onAccept: async () => {
+            try {
+                await axios.delete(`${API_URL}/api/admin/playlists/${selectedPlaylistId}`);
+                setPlaylistDetails(null);
+                setSelectedPlaylistId('');
+                await loadData();
+                showToast('Playlist eliminada.', 'success');
+            } catch (err) {
+                showToast('Error al eliminar: ' + (err.response?.data?.message || err.message), 'error');
+            }
+        }
+    });
+
+    const handleReorderPlaylist = async (index, offset) => {
+        const items = [...(playlistDetails?.items || [])];
+        const destination = index + offset;
+        if (destination < 0 || destination >= items.length) return;
+        [items[index], items[destination]] = [items[destination], items[index]];
+        try {
+            await axios.put(`${API_URL}/api/admin/playlists/${selectedPlaylistId}/items/order`, {
+                items: items.map((item) => ({ id: item.id }))
+            });
+            const res = await axios.get(`${API_URL}/api/admin/playlists/${selectedPlaylistId}`);
+            if (res.data.success) setPlaylistDetails(res.data);
+        } catch (err) {
+            showToast('Error al cambiar el orden: ' + (err.response?.data?.message || err.message), 'error');
         }
     };
 
@@ -274,7 +330,7 @@ export default function ContentManager() {
                 <div className="panel-card" style={{ maxWidth: '600px' }}>
                     <h3>⬆️ Subir Video o Imagen</h3>
                     <form className="config-form" onSubmit={handleUploadSubmit}>
-                        <label>Seleccionar Archivo (MP4, WebM, PNG, JPG — hasta 300MB)</label>
+                        <label>Seleccionar Archivo (MP4, WebM, PNG, JPG — hasta 500MB)</label>
                         <input
                             type="file"
                             accept="video/*,image/*"
@@ -393,6 +449,14 @@ export default function ContentManager() {
                                     Crear Playlist
                                 </button>
                             </form>
+                            {playlistDetails?.playlist && (
+                                <form className="config-form mt-4" onSubmit={handleRenamePlaylist}>
+                                    <h4>Editar playlist</h4>
+                                    <input value={editPlaylistName} onChange={(e) => setEditPlaylistName(e.target.value)} required />
+                                    <button type="submit" className="btn-secondary mt-2">Guardar nombre</button>
+                                    <button type="button" className="btn-danger mt-2" onClick={handleDeletePlaylist}>Eliminar playlist</button>
+                                </form>
+                            )}
                         </div>
 
                         {/* Programación de la Playlist Seleccionada */}
@@ -421,7 +485,8 @@ export default function ContentManager() {
                                             type="time"
                                             value={addStartTime}
                                             onChange={(e) => setAddStartTime(e.target.value)}
-                                            required
+                                            disabled={isAlwaysOn}
+                                            required={!isAlwaysOn}
                                         />
                                     </div>
                                     <div>
@@ -430,13 +495,31 @@ export default function ContentManager() {
                                             type="time"
                                             value={addEndTime}
                                             onChange={(e) => setAddEndTime(e.target.value)}
-                                            required
+                                            disabled={isAlwaysOn}
+                                            required={!isAlwaysOn}
                                         />
                                     </div>
                                     <button type="submit" className="btn-primary" style={{ height: '42px' }}>
                                         ➕ Añadir
                                     </button>
                                 </div>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '12px' }}>
+                                    <input type="checkbox" checked={isAlwaysOn} onChange={(e) => setIsAlwaysOn(e.target.checked)} />
+                                    Continuo 24/7 (sin horario)
+                                </label>
+                                <fieldset style={{ border: '1px solid var(--border-card)', borderRadius: '8px', marginTop: '10px' }}>
+                                    <legend>Días de emisión</legend>
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px' }}>
+                                        {['lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'domingo'].map((day) => (
+                                            <label key={day} style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                                <input type="checkbox" checked={selectedDays.includes(day)} onChange={(e) => {
+                                                    setSelectedDays((days) => e.target.checked ? [...days, day] : days.filter((value) => value !== day));
+                                                }} />
+                                                {day}
+                                            </label>
+                                        ))}
+                                    </div>
+                                </fieldset>
                             </form>
 
                             {playlistDetails?.items?.length === 0 ? (
@@ -453,11 +536,13 @@ export default function ContentManager() {
                                     </thead>
                                     <tbody>
                                         {playlistDetails?.items?.map((it, idx) => (
-                                            <tr key={idx}>
+                                            <tr key={it.id || idx}>
                                                 <td><strong>{it.title}</strong></td>
-                                                <td>{it.start_time} - {it.end_time}</td>
-                                                <td><span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Lun - Dom</span></td>
+                                                <td>{it.start_time && it.end_time ? `${it.start_time} - ${it.end_time}` : '24/7'}</td>
+                                                <td><span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{(it.days_of_week || []).join(', ')}</span></td>
                                                 <td>
+                                                    <button className="btn-secondary" disabled={idx === 0} onClick={() => handleReorderPlaylist(idx, -1)} title="Mover arriba">↑</button>
+                                                    <button className="btn-secondary" disabled={idx === playlistDetails.items.length - 1} onClick={() => handleReorderPlaylist(idx, 1)} title="Mover abajo">↓</button>
                                                     <button className="btn-danger" onClick={() => handleRemoveFromPlaylist(it.content_id)}>
                                                         Quitar
                                                     </button>

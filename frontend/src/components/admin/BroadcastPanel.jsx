@@ -6,6 +6,7 @@ export default function BroadcastPanel() {
     const [screens, setScreens] = useState([]);
     const [contentList, setContentList] = useState([]);
     const [activeState, setActiveState] = useState({ global: null, byScreen: {} });
+    const [isPlaybackPaused, setIsPlaybackPaused] = useState(false);
 
     // Modo de selección de origen: 'upload' | 'library' | 'external'
     const [sourceMode, setSourceMode] = useState('upload');
@@ -159,6 +160,7 @@ export default function BroadcastPanel() {
             });
 
             if (res.data.success) {
+                setIsPlaybackPaused(false);
                 setMessage(`🚀 ${res.data.message}`);
                 loadData();
                 setTimeout(() => setMessage(''), 4000);
@@ -175,6 +177,7 @@ export default function BroadcastPanel() {
         try {
             const res = await axios.post(`${API_URL}/api/admin/clear-temporary`, { target: targetToClear });
             if (res.data.success) {
+                setIsPlaybackPaused(false);
                 setActiveState({ global: null, byScreen: {} });
                 setMessage(`⏹️ ${res.data.message}`);
                 loadData();
@@ -194,6 +197,8 @@ export default function BroadcastPanel() {
                 payload
             });
             if (res.data.success) {
+                if (action === 'pause') setIsPlaybackPaused(true);
+                if (action === 'play' || action === 'resume') setIsPlaybackPaused(false);
                 setMessage(`🎮 Acción '${action}' enviada a las pantallas.`);
                 setTimeout(() => setMessage(''), 3000);
             }
@@ -250,12 +255,18 @@ export default function BroadcastPanel() {
                             </p>
                         </div>
                         <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
-                            <button className="btn-secondary" onClick={() => handleControlAction('pause')} title="Pausar video">
-                                ⏸️ Pausar
-                            </button>
-                            <button className="btn-secondary" onClick={() => handleControlAction('play')} title="Reanudar video">
-                                ▶️ Reanudar
-                            </button>
+                            <span role="status" style={{ alignSelf: 'center', color: isPlaybackPaused ? '#ff9500' : '#34c759', fontWeight: 600 }}>
+                                {isPlaybackPaused ? '⏸️ Reproducción pausada' : '▶️ Reproducción activa'}
+                            </span>
+                            {isPlaybackPaused ? (
+                                <button className="btn-secondary" onClick={() => handleControlAction('play')} title="Reanudar reproducción">
+                                    ▶️ Reanudar
+                                </button>
+                            ) : (
+                                <button className="btn-secondary" onClick={() => handleControlAction('pause')} title="Pausar reproducción">
+                                    ⏸️ Pausar
+                                </button>
+                            )}
                             <button className="btn-secondary" onClick={() => handleControlAction('unmute')} title="Activar sonido">
                                 🔊 Sonido
                             </button>
@@ -362,7 +373,7 @@ export default function BroadcastPanel() {
                                     <div className="dropzone-subtitle">
                                         {isUploading
                                             ? 'Extrayendo metadatos y duración automáticamente...'
-                                            : 'o haz clic aquí para seleccionar desde tu computadora (MP4, WebM, JPG, PNG — hasta 300MB)'}
+                                            : 'o haz clic aquí para seleccionar desde tu computadora (MP4, WebM, JPG, PNG — hasta 500MB)'}
                                     </div>
                                 </div>
 

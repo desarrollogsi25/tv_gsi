@@ -56,6 +56,16 @@ export default function TVRegister() {
         }
     };
 
+    const handleRejectScreen = async (sessionCode) => {
+        try {
+            const res = await axios.post(`${API_URL}/api/admin/waiting-screens/${encodeURIComponent(sessionCode)}/reject`);
+            showToast(res.data.message || 'Solicitud rechazada.', 'success');
+            loadData();
+        } catch (err) {
+            showToast('Error al rechazar: ' + (err.response?.data?.message || err.message), 'error');
+        }
+    };
+
     return (
         <div className="admin-section">
             <h2>Vinculación Automática & Asignación de Usuarios</h2>
@@ -134,6 +144,9 @@ export default function TVRegister() {
                                             onClick={() => handleBindScreen(tv.sessionCode)}
                                         >
                                             🔗 Asignar y Activar TV
+                                        </button>
+                                        <button className="btn-danger" style={{ marginLeft: '8px' }} onClick={() => handleRejectScreen(tv.sessionCode)}>
+                                            Rechazar
                                         </button>
                                     </td>
                                 </tr>

@@ -4,6 +4,8 @@
 
 const onlineScreens = new Map(); // tv_uuid -> socket.id
 const waitingScreens = new Map(); // socket.id -> { socketId, sessionCode, connectedAt }
+const jwt = require('jsonwebtoken');
+const JWT_SECRET = require('../config/jwt');
 
 // Estado de Contenido Temporal en Vivo (Override de Playlist)
 let globalTemporaryContent = null;
@@ -14,6 +16,22 @@ function initSockets(io) {
     // Namespace: /control (Comandos, Broadcast y Auto-Detección)
     // ─────────────────────────────────────────────────────────
     const controlNs = io.of('/control');
+
+    controlNs.use((socket, next) => {
+        const isTv = Boolean(socket.handshake.query.tv_uuid);
+        const isWaitingTv = socket.handshake.query.waiting_pairing === 'true' && socket.handshake.query.session_code;
+        if (isTv || isWaitingTv) return next();
+
+        const token = socket.handshake.auth?.token;
+        if (!token) return next(new Error('Authentication required'));
+        try {
+            socket.data.user = jwt.verify(token, JWT_SECRET);
+            if (socket.data.user.role !== 'admin') return next(new Error('Administrator access required'));
+            return next();
+        } catch (_err) {
+            return next(new Error('Invalid or expired token'));
+        }
+    });
 
     controlNs.on('connection', (socket) => {
         const tvUuid = socket.handshake.query.tv_uuid;
@@ -38,6 +56,7 @@ function initSockets(io) {
         else if (tvUuid) {
             onlineScreens.set(tvUuid, socket.id);
             socket.join(`tv:${tvUuid}`);
+            socket.join(`screen_${tvUuid}`);
             console.log(`🎮 [Control Hub] TV conectada: [${tvUuid}] en socket ${socket.id}`);
 
             controlNs.emit('tv:status_change', { tv_uuid: tvUuid, is_online: true, socket_id: socket.id });
@@ -48,12 +67,22 @@ function initSockets(io) {
                 console.log(`⚡ [Control Hub] Enviando contenido temporal activo a TV [${tvUuid}]`);
                 socket.emit('command:temporary_content', activeOverride);
             }
+            socket.emit('screen:registered', { tv_uuid: tvUuid });
         } 
         // Caso C: Consola de Administración
-        else {
+        else if (socket.data.user) {
             console.log(`🎮 [Control Hub] Consola de Administración conectada: ${socket.id}`);
             socket.join('admins');
         }
+
+        socket.on('register_screen', ({ tv_uuid: registeredUuid } = {}) => {
+            if (!tvUuid || registeredUuid !== tvUuid) {
+                socket.emit('screen:registration_error', { message: 'UUID de pantalla no coincide.' });
+                return;
+            }
+            socket.join(`screen_${tvUuid}`);
+            socket.emit('screen:registered', { tv_uuid: tvUuid });
+        });
 
         // Heartbeat de pantalla
         socket.on('tv:heartbeat', (data) => {
@@ -64,6 +93,7 @@ function initSockets(io) {
                     current_content: data.current_content,
                     volume: data.volume,
                     is_override: data.is_override || false,
+                    is_audio_unlocked: data.is_audio_unlocked || false,
                     timestamp: new Date().toISOString()
                 });
             }
@@ -71,11 +101,12 @@ function initSockets(io) {
 
         // Enviar comando a pantalla
         socket.on('admin:send_command', ({ tv_uuid, command, payload }) => {
+            if (!socket.data.user) return;
             console.log(`📡 [Control Hub] Enviando '${command}' a TV [${tv_uuid}]`);
             if (tv_uuid === 'all') {
                 controlNs.emit('command:execute', { command, payload });
             } else {
-                controlNs.to(`tv:${tv_uuid}`).emit('command:execute', { command, payload });
+                controlNs.to(`tv:${tv_uuid}`).to(`screen_${tv_uuid}`).emit('command:execute', { command, payload });
             }
         });
 
@@ -120,7 +151,7 @@ function initSockets(io) {
             controlNs.emit('command:temporary_content', content);
         } else {
             screenTemporaryContent.set(target, content);
-            controlNs.to(`tv:${target}`).emit('command:temporary_content', content);
+            controlNs.to(`tv:${target}`).to(`screen_${target}`).emit('command:temporary_content', content);
         }
     }
 
@@ -133,7 +164,7 @@ function initSockets(io) {
             controlNs.emit('command:clear_temporary', {});
         } else {
             screenTemporaryContent.delete(target);
-            controlNs.to(`tv:${target}`).emit('command:clear_temporary', {});
+            controlNs.to(`tv:${target}`).to(`screen_${target}`).emit('command:clear_temporary', {});
             if (globalTemporaryContent) {
                 globalTemporaryContent = null;
                 controlNs.emit('command:clear_temporary', {});

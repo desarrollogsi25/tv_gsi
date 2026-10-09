@@ -26,7 +26,8 @@ export default function TVControl() {
     // Conectar a WebSockets para recibir telemetría de audio en vivo
     useEffect(() => {
         const socket = io(`${API_URL}/control`, {
-            transports: ['websocket', 'polling']
+            transports: ['websocket', 'polling'],
+            auth: { token: localStorage.getItem('token') }
         });
 
         socket.on('tv:heartbeat_received', (data) => {
@@ -226,13 +227,13 @@ export default function TVControl() {
                     </p>
 
                     <div className="button-group mt-4" style={{ flexWrap: 'wrap' }}>
-                        <button className="btn-play" onClick={() => sendCommand('play')}>
+                        <button className="btn-play" onClick={() => sendCommand('resume')}>
                             ▶️ Reanudar
                         </button>
                         <button className="btn-pause" onClick={() => sendCommand('pause')}>
                             ⏸️ Pausar
                         </button>
-                        <button className="btn-secondary" onClick={() => sendCommand('next')}>
+                        <button className="btn-secondary" onClick={() => sendCommand('skip')}>
                             ⏭️ Saltar Contenido
                         </button>
                         <button className="btn-primary" onClick={() => sendCommand('reload')}>
@@ -259,7 +260,7 @@ export default function TVControl() {
                             onChange={(e) => {
                                 const val = parseInt(e.target.value, 10);
                                 setVolume(val);
-                                sendCommand('volume', { level: val });
+                                sendCommand('set_volume', { volume: val / 100 });
                             }}
                         />
                     </div>
