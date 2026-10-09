@@ -38,6 +38,7 @@ let ioServer;
 let socketHub;
 let serverPort;
 let screensDb;
+const clientSockets = new Set();
 
 function createMockPool() {
     return {
@@ -67,6 +68,7 @@ function connectClient(options = {}) {
             autoConnect: true,
             ...options
         });
+        clientSockets.add(client);
 
         let resolved = false;
         client.on('connect', () => {
@@ -78,9 +80,29 @@ function connectClient(options = {}) {
         client.on('connect_error', (err) => {
             if (!resolved) {
                 resolved = true;
-                resolve({ client, error: err });
+                resolve({ client, error: { message: err.message } });
             }
         });
+    });
+}
+
+function closeClient(client) {
+    if (!client) return Promise.resolve();
+
+    return new Promise((resolve) => {
+        const engine = client.io.engine;
+        let settled = false;
+        const finish = () => {
+            if (settled) return;
+            settled = true;
+            clientSockets.delete(client);
+            resolve();
+        };
+
+        if (engine && engine.readyState !== 'closed') engine.once('close', finish);
+        client.disconnect();
+        if (engine && engine.readyState !== 'closed') engine.close();
+        if (!engine || engine.readyState === 'closed') finish();
     });
 }
 
@@ -132,8 +154,22 @@ test.before(async () => {
 });
 
 test.after(async () => {
-    ioServer.close();
-    await new Promise((resolve) => server.close(resolve));
+    await Promise.all([...clientSockets].map(closeClient));
+
+    socketHub?.pairingSessions.close();
+
+    if (ioServer) {
+        await new Promise((resolve) => ioServer.close(resolve));
+    }
+
+    if (server?.listening) {
+        await new Promise((resolve, reject) => {
+            server.close((error) => {
+                if (error && error.code !== 'ERR_SERVER_NOT_RUNNING') reject(error);
+                else resolve();
+            });
+        });
+    }
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -143,7 +179,7 @@ test('1. Conexión de TV sin UUID y sin credencial: no se registra como TV', asy
     const { client, error } = await connectClient({});
     assert.ok(error, 'La conexión sin credenciales debe ser rechazada');
     assert.match(error.message, /Authentication required/i);
-    client.close();
+    await closeClient(client);
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -155,7 +191,7 @@ test('2. Conexión con UUID conocido y sin credencial: rechazada', async () => {
     });
     assert.ok(error, 'Debe rechazar la conexión que sólo declara tv_uuid');
     assert.match(error.message, /device_token is required/i);
-    client.close();
+    await closeClient(client);
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -167,7 +203,7 @@ test('3. Conexión con UUID y credencial vacía: rechazada', async () => {
     });
     assert.ok(error, 'Debe rechazar token vacío');
     assert.match(error.message, /device_token is required/i);
-    client.close();
+    await closeClient(client);
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -179,7 +215,7 @@ test('4. Credencial malformada: rechazada', async () => {
     });
     assert.ok(error, 'Debe rechazar credencial malformada');
     assert.match(error.message, /malformed device_token/i);
-    client.close();
+    await closeClient(client);
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -191,7 +227,7 @@ test('5. Credencial de TV A utilizada con UUID de TV B: rechazada', async () => 
     });
     assert.ok(error, 'Debe rechazar credencial cruzada de otra TV');
     assert.match(error.message, /invalid device credentials/i);
-    client.close();
+    await closeClient(client);
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -204,7 +240,7 @@ test('6. Credencial revocada: rechazada', async () => {
     });
     assert.ok(error, 'Debe rechazar conexión en pantalla con credencial revocada (hash null)');
     assert.match(error.message, /pairing required/i);
-    client.close();
+    await closeClient(client);
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -216,7 +252,7 @@ test('7. Pantalla inactiva: no puede autenticarse como pantalla operativa', asyn
     });
     assert.ok(error, 'Debe rechazar pantalla inactiva');
     assert.match(error.message, /screen is inactive/i);
-    client.close();
+    await closeClient(client);
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -228,7 +264,7 @@ test('8. Credencial válida de TV A: aceptada para TV A', async () => {
     });
     assert.equal(error, null, 'Credencial legítima debe ser aceptada');
     assert.equal(socketHub.onlineScreens.has(TV_A_UUID), true);
-    client.close();
+    await closeClient(client);
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -239,7 +275,7 @@ test('9. Credencial válida después de una reconexión: aceptada si sigue autor
         auth: { tv_uuid: TV_A_UUID, device_token: TOKEN_A }
     });
     assert.equal(c1.error, null);
-    c1.client.close();
+    await closeClient(c1.client);
 
     // Pequeña pausa para desconexión
     await new Promise((r) => setTimeout(r, 50));
@@ -248,7 +284,7 @@ test('9. Credencial válida después de una reconexión: aceptada si sigue autor
         auth: { tv_uuid: TV_A_UUID, device_token: TOKEN_A }
     });
     assert.equal(c2.error, null, 'Reconexión con credencial legítima debe conectarse exitosamente');
-    c2.client.close();
+    await closeClient(c2.client);
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -268,14 +304,14 @@ test('10. Nueva vinculación: credencial anterior invalidada', async () => {
     });
     assert.ok(oldError, 'El token previo debe ser rechazado tras una revinculación');
     assert.match(oldError.message, /invalid device credentials/i);
-    oldClient.close();
+    await closeClient(oldClient);
 
     // Conectar con la nueva credencial
     const { client: newClient, error: newError } = await connectClient({
         auth: { tv_uuid: TV_B_UUID, device_token: newToken }
     });
     assert.equal(newError, null, 'La nueva credencial debe ser aceptada');
-    newClient.close();
+    await closeClient(newClient);
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -309,7 +345,7 @@ test('12. TV pendiente: puede solicitar pairing sin adquirir permisos administra
 
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(commandReceived, false, 'TV en espera no tiene permisos administrativos');
-    client.close();
+    await closeClient(client);
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -319,7 +355,7 @@ test('13. Socket administrativo sin token: rechazado', async () => {
     const { client, error } = await connectClient({});
     assert.ok(error);
     assert.match(error.message, /Authentication required/i);
-    client.close();
+    await closeClient(client);
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -332,7 +368,7 @@ test('14. Socket administrativo con rol viewer: rechazado', async () => {
     });
     assert.ok(error, 'Usuario viewer debe ser rechazado en /control');
     assert.match(error.message, /Administrator access required/i);
-    client.close();
+    await closeClient(client);
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -345,7 +381,7 @@ test('15. Socket administrativo con rol editor: rechazado', async () => {
     });
     assert.ok(error, 'Usuario editor debe ser rechazado en /control');
     assert.match(error.message, /Administrator access required/i);
-    client.close();
+    await closeClient(client);
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -357,7 +393,7 @@ test('16. Socket administrativo con rol admin: aceptado', async () => {
         auth: { token: adminToken }
     });
     assert.equal(error, null, 'Usuario admin con token válido debe ser admitido');
-    client.close();
+    await closeClient(client);
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -377,14 +413,14 @@ test('17. Desconexión de un socket antiguo: no elimina la presencia del socket 
     assert.equal(s2.error, null);
 
     // Desconectar el primer socket (antiguo)
-    s1.client.close();
+    await closeClient(s1.client);
     await new Promise((r) => setTimeout(r, 60));
 
     // La TV debe seguir ONLINE en onlineScreens porque el socket 2 continúa conectado
     assert.equal(socketHub.onlineScreens.has(TV_A_UUID), true, 'La presencia debe mantenerse mientras haya un socket activo');
     assert.equal(socketHub.onlineScreens.get(TV_A_UUID), s2.client.id);
 
-    s2.client.close();
+    await closeClient(s2.client);
     await new Promise((r) => setTimeout(r, 60));
     assert.equal(socketHub.onlineScreens.has(TV_A_UUID), false, 'Debe marcarse offline solo al desconectar todos los sockets');
 });
@@ -402,7 +438,7 @@ test('18. Limpieza de solicitudes pendientes al desconectar', async () => {
     const session = socketHub.pairingSessions.sessions.get(waiting.pairingSessionId);
     assert.equal(session.socketId, client.id);
 
-    client.close();
+    await closeClient(client);
     await new Promise((r) => setTimeout(r, 60));
 
     assert.equal(session.status, 'cancelled', 'La sesión debe consumirse al desconectar');
