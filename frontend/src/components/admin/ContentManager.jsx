@@ -262,7 +262,7 @@ export default function ContentManager() {
             )}
 
             {/* Selector de Pestañas */}
-            <div style={{ display: 'flex', gap: '8px', marginBottom: '24px' }}>
+            <div className="content-tabs" style={{ display: 'flex', gap: '8px', marginBottom: '24px' }}>
                 <button
                     className={activeTab === 'library' ? 'btn-primary' : 'btn-secondary'}
                     onClick={() => setActiveTab('library')}

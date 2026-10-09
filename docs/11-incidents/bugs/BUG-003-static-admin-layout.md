@@ -4,7 +4,7 @@
 - **Severidad:** Media
 - **Prioridad:** P2
 - **Fecha de Detección:** 2026-10-08
-- **Estado:** 🟢 Cerrado y Validado en QA
+- **Estado:** 🟢 Resuelto / Verificado (Playwright + Chrome local, 2026-10-09)
 - **Reportado por:** QA Lead & Senior Software Architect
 
 ---
@@ -73,3 +73,17 @@ En pantallas con resoluciones de tablet o portátiles pequeñas (viewport $\le 1
    }
    ```
 2. Envolver `.nexus-table` dentro de un contenedor `<div className="table-responsive">` con `overflow-x: auto;`.
+
+---
+
+### 8. Retest dinámico responsive (2026-10-09)
+
+* **Herramienta:** Playwright 1.64.0 invocado con `npx`; la dependencia no está declarada ni instalada en el proyecto. Se conectó a Chrome local (`C:\Program Files\Google\Chrome\Application\chrome.exe`) mediante `executablePath`; no fue necesario descargar un navegador. Vite sirvió el frontend en localhost. El arnés interceptó las llamadas API con respuestas JSON deterministas y un token de interfaz ficticio; no envió credenciales ni ejecutó mutaciones.
+* **Vistas:** `/admin` (lista de pantallas), `/admin/register` (perfil y sesión de prueba), `/admin/broadcast` y `/admin/content` (datos vacíos simulados, salvo un perfil/sesión de muestra en Vinculación).
+* **Viewports:** 375×812, 414×896, 768×1024, 1280×800 y 1920×1080.
+* **Correcciones:** `TVRegister.jsx` ahora presenta las tablas de vinculación y perfiles como tarjetas etiquetadas en móvil, permite envolver las acciones y limita el selector al ancho disponible. Las pestañas de Broadcast se envuelven; las de Contenido forman filas flexibles; el grid de tarjetas Broadcast usa una columna en móvil.
+* **Resultado común tras el cambio:** `document.documentElement.scrollWidth` y `.admin-main.scrollWidth` coincidieron con el viewport en las 20 combinaciones. Ningún botón, enlace, input, selector o tab dentro de `.admin-main` rebasó x=ancho del viewport.
+* **Coordenada X máxima de controles por viewport:** 375 px → x=359; 414 px → x=398; 768 px → x=752. Por ruta a 375 px: `/admin/register` x=326, `/admin/broadcast` x=326, `/admin` y `/admin/content` x=359. A 414 px: Register/Broadcast x=365, Admin/Content x=398. A 768 px: Register/Broadcast x=719, Admin/Content x=752.
+* **Escritorio:** 1280 px y 1920 px también pasaron; no hubo scroll del documento ni controles fuera del viewport. Los paneles conservaron su distribución de escritorio.
+* **Build:** `npm run build` terminó correctamente con 126 módulos transformados. Vite mostró la advertencia conocida de Node 20.18 (recomienda 20.19+ o 22.12+).
+* **Dictamen:** BUG-003 **Resuelto / Verificado** para las vistas y anchos probados. Evidencia detallada: [TC-004.md](../../13-testing/results/TC-004.md).
