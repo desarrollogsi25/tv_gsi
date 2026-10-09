@@ -1,8 +1,7 @@
-const DEVELOPMENT_SECRET = 'nexus-tv-jwt-secret-key-2026';
-const JWT_SECRET = process.env.JWT_SECRET || (process.env.NODE_ENV === 'production' ? null : DEVELOPMENT_SECRET);
+const JWT_SECRET = process.env.JWT_SECRET;
 
 if (!JWT_SECRET) {
-    throw new Error('JWT_SECRET must be set when NODE_ENV=production.');
+    throw new Error('JWT_SECRET must be set.');
 }
 
 module.exports = JWT_SECRET;
