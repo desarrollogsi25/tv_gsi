@@ -50,6 +50,12 @@
     background: #fff;
 }
 
+.tv-iframe-player > div,
+.tv-iframe-player iframe {
+    width: 100%;
+    height: 100%;
+}
+
 /* No Content / Waiting State */
 .tv-waiting-state {
     display: flex;
