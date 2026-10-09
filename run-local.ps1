@@ -151,8 +151,17 @@ elseif ($Option -eq "6") {
 }
 elseif ($Option -eq "7") {
     Write-Host ""
-    $TvId = Read-Host "Ingresa UUID de la TV (Enter para abrir pantalla sin vincular o con perfil guardado)"
-    & "$ProjectRoot\start-tv-kiosk.ps1" -TvUuid $TvId
+    Write-Host "Selecciona el modo de reproductor Kiosk:" -ForegroundColor $White
+    Write-Host " 1) Modo Normal (Mantiene identidad y perfil persistente)" -ForegroundColor $Green
+    Write-Host " 2) Modo TV Nueva (Perfil limpio e independiente, muestra PIN)" -ForegroundColor $Cyan
+    $KioskSelection = Read-Host "Opcion [1-2, por defecto 1]"
+    if ($KioskSelection -eq "2") {
+        Write-Host "[+] Iniciando en modo de prueba TV Nueva con perfil aislado..." -ForegroundColor $Cyan
+        & "$ProjectRoot\start-tv-kiosk.ps1" -NewProfile
+    } else {
+        $TvId = Read-Host "Ingresa UUID de la TV (Enter para usar perfil normal)"
+        & "$ProjectRoot\start-tv-kiosk.ps1" -TvUuid $TvId
+    }
 }
 else {
     Write-Host "Operacion finalizada." -ForegroundColor $Yellow
