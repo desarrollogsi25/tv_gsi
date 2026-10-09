@@ -3,11 +3,14 @@
 // Cubre los 18 escenarios de seguridad obligatorios de Socket.IO /control
 // ═══════════════════════════════════════════════════════════
 
+process.env.NODE_ENV = 'test';
+process.env.JWT_SECRET ||= require('node:crypto').randomBytes(32).toString('hex');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const { Server } = require('socket.io');
-const { io: ioc } = require('../frontend/node_modules/socket.io-client');
+const { io: ioc } = require('socket.io-client');
 const jwt = require('jsonwebtoken');
 
 const JWT_SECRET = require('../src/config/jwt');

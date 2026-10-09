@@ -1,11 +1,12 @@
-require('dotenv').config();
+process.env.NODE_ENV = 'test';
+process.env.JWT_SECRET ||= require('node:crypto').randomBytes(32).toString('hex');
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const express = require('express');
 const http = require('node:http');
 const { Server } = require('socket.io');
-const { io: ioc } = require('../frontend/node_modules/socket.io-client');
+const { io: ioc } = require('socket.io-client');
 const jwt = require('jsonwebtoken');
 const jwtSecret = require('../src/config/jwt');
 const authMiddleware = require('../src/middlewares/auth');

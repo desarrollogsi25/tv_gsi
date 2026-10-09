@@ -8,7 +8,9 @@ const fs = require('fs');
 
 const port = parseInt(process.env.PORT, 10) || 3002;
 const databasePassword = process.env.PG_PASSWORD || (process.env.NODE_ENV === 'production' ? null : '');
-if (!databasePassword) throw new Error('PG_PASSWORD must be set when NODE_ENV=production.');
+if (process.env.NODE_ENV === 'production' && !databasePassword) {
+    throw new Error('PG_PASSWORD must be set when NODE_ENV=production.');
+}
 
 // Pool de conexiones PostgreSQL
 const pool = new Pool({
