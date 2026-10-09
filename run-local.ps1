@@ -57,10 +57,20 @@ $Option = Read-Host "Opcion [1-8]"
 
 if ($Option -eq "1") {
     Write-Host ""
-    # Asegurar archivo .env
+    # Asegurar archivo .env con credenciales seguras si no existe
     if (-not (Test-Path "$ProjectRoot\.env") -and (Test-Path "$ProjectRoot\.env.example")) {
-        Write-Host "[i] Inicializando archivo .env desde .env.example..." -ForegroundColor $Yellow
-        Copy-Item "$ProjectRoot\.env.example" "$ProjectRoot\.env"
+        Write-Host "[!] Archivo .env no encontrado. Generando .env con secretos criptograficos seguros..." -ForegroundColor $Yellow
+        $envContent = Get-Content "$ProjectRoot\.env.example" -Raw
+        $randomBytes = New-Object byte[] 32
+        [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($randomBytes)
+        $randomSecret = [System.BitConverter]::ToString($randomBytes).Replace("-", "").ToLower()
+        $dbBytes = New-Object byte[] 16
+        [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($dbBytes)
+        $randomDbPass = [System.BitConverter]::ToString($dbBytes).Replace("-", "").ToLower()
+        $envContent = $envContent.Replace("replace_with_a_random_secret_of_at_least_32_bytes", $randomSecret)
+        $envContent = $envContent.Replace("replace_with_a_unique_database_password", $randomDbPass)
+        [System.IO.File]::WriteAllText("$ProjectRoot\.env", $envContent, [System.Text.Encoding]::UTF8)
+        Write-Host "[OK] Archivo .env inicializado con secretos unicos generados criptograficamente." -ForegroundColor Green
     }
 
     Write-Host "[+] Compilando y levantando contenedores locales en puertos aislados (DB:25432, API:23002, Web:28080)..." -ForegroundColor $Yellow
