@@ -91,18 +91,35 @@ function closeClient(client) {
 
     return new Promise((resolve) => {
         const engine = client.io.engine;
+        const serverSocket = client.id
+            ? ioServer?.of('/control').sockets.get(client.id)
+            : null;
         let settled = false;
+        let clientClosed = !engine || engine.readyState === 'closed';
+        let serverClosed = !serverSocket || !serverSocket.connected;
         const finish = () => {
-            if (settled) return;
+            if (settled || !clientClosed || !serverClosed) return;
             settled = true;
             clientSockets.delete(client);
             resolve();
         };
 
-        if (engine && engine.readyState !== 'closed') engine.once('close', finish);
+        if (!clientClosed) {
+            engine.once('close', () => {
+                clientClosed = true;
+                finish();
+            });
+        }
+        if (!serverClosed) {
+            serverSocket.once('disconnect', () => {
+                serverClosed = true;
+                finish();
+            });
+        }
+
         client.disconnect();
         if (engine && engine.readyState !== 'closed') engine.close();
-        if (!engine || engine.readyState === 'closed') finish();
+        finish();
     });
 }
 
