@@ -90,17 +90,20 @@ router.get('/:tv_uuid/playlist', async (req, res) => {
                 (pc.start_time IS NULL OR pc.end_time IS NULL)
                 OR (LOCALTIME BETWEEN pc.start_time AND pc.end_time)
               )
-              AND pc.days_of_week && (
-                CASE EXTRACT(ISODOW FROM CURRENT_DATE)
-                  WHEN 1 THEN ARRAY['lunes']
-                  WHEN 2 THEN ARRAY['martes']
-                  WHEN 3 THEN ARRAY['miércoles', 'miercoles']
-                  WHEN 4 THEN ARRAY['jueves']
-                  WHEN 5 THEN ARRAY['viernes']
-                  WHEN 6 THEN ARRAY['sábado', 'sabado']
-                  WHEN 7 THEN ARRAY['domingo']
-                END
-              )::text[]
+              AND (
+                pc.days_of_week IS NULL
+                OR pc.days_of_week && (
+                  CASE EXTRACT(ISODOW FROM CURRENT_DATE)
+                    WHEN 1 THEN ARRAY['lunes']
+                    WHEN 2 THEN ARRAY['martes']
+                    WHEN 3 THEN ARRAY['miércoles', 'miercoles']
+                    WHEN 4 THEN ARRAY['jueves']
+                    WHEN 5 THEN ARRAY['viernes']
+                    WHEN 6 THEN ARRAY['sábado', 'sabado']
+                    WHEN 7 THEN ARRAY['domingo']
+                  END
+                )::text[]
+              )
             ORDER BY pc.position ASC, pc.start_time ASC NULLS FIRST, c.id ASC;
         `;
 

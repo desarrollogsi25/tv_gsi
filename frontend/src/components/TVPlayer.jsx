@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { io } from 'socket.io-client';
 import axios from 'axios';
 import { showConfirmation } from './Toast';
+import YouTubePlayer from './YouTubePlayer';
+import { createSeededRandom, getMediaKind, getNextIndex, getYouTubeVideoId, playbackDurationMs, shuffleIndices } from '../utils/playlistPlayback.mjs';
 import './TVPlayer.css';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
@@ -109,15 +111,6 @@ export default function TVPlayer() {
                 setTemporaryContent(null);
             }, duration);
         }
-    };
-
-    const getMediaKind = (item) => {
-        const url = item?.source_url || '';
-        const path = url.split(/[?#]/, 1)[0].toLowerCase();
-        if (item?.content_type === 'video' || /\.(mp4|webm|mkv|mov|ogv|m4v|mpeg|mpg|3gp)$/.test(path)) return 'video';
-        if (['image', 'img'].includes(item?.content_type) || /\.(avif|gif|jpe?g|png|svg|webp|bmp)$/.test(path)) return 'image';
-        if (getYouTubeEmbed(url) || ['power_bi', 'url', 'iframe', 'external_url', 'youtube'].includes(item?.content_type)) return 'iframe';
-        return 'image';
     };
 
     useEffect(() => {
@@ -255,7 +248,8 @@ export default function TVPlayer() {
         try {
             const res = await axios.get(`${API_BASE}/api/tv/${uuid}/playlist?t=${Date.now()}`);
             if (res.data.success && res.data.playlist.length > 0) {
-                setPlaylist(res.data.playlist);
+                const firstOrder = shuffleIndices(res.data.playlist.length, createSeededRandom(uuid));
+                setPlaylist(firstOrder.map((index) => res.data.playlist[index]));
                 setCurrentIndex(0);
             } else {
                 setPlaylist([]);
@@ -485,8 +479,33 @@ export default function TVPlayer() {
         timerRef.current = null;
         timerDeadlineRef.current = null;
         timerRemainingRef.current = null;
+        const next = getNextIndex(currentIndex, playlist.length);
         setPlaybackCycle((cycle) => cycle + 1);
-        setCurrentIndex((prev) => (prev + 1) % playlist.length);
+        if (next === 0 && playlist.length > 1) {
+            const order = shuffleIndices(
+                playlist.length,
+                createSeededRandom(`${tvUuid}:${playbackCycle + 1}:${Date.now()}`),
+                currentIndex
+            );
+            setPlaylist((items) => order.map((index) => items[index]));
+            setCurrentIndex(0);
+        } else {
+            setCurrentIndex(next);
+        }
+    };
+
+    const startVideoFallback = (durationSeconds) => {
+        if (isPausedRef.current || playlist.length <= 1 || !Number.isFinite(durationSeconds) || durationSeconds <= 0) return;
+        if (timerRef.current) clearTimeout(timerRef.current);
+        const duration = timerRemainingRef.current ?? ((durationSeconds * 1000) + 5000);
+        timerRemainingRef.current = null;
+        timerDeadlineRef.current = Date.now() + duration;
+        timerRef.current = setTimeout(() => {
+            timerRef.current = null;
+            timerDeadlineRef.current = null;
+            timerRemainingRef.current = null;
+            handleNext();
+        }, duration);
     };
 
     // Bucle continuo y seguro de Video
@@ -533,9 +552,13 @@ export default function TVPlayer() {
             timerRemainingRef.current = null;
         }
         const isVideo = getMediaKind(currentItem) === 'video';
+        const isYouTubeVideo = Boolean(getYouTubeVideoId(currentItem.source_url));
 
-        if (!isVideo && !isPaused) {
-            const duration = (timerRemainingRef.current ?? (currentItem.duration_seconds || 15) * 1000);
+        if (isVideo && playlist.length > 1 && !isPaused && videoRef.current?.readyState >= 1) {
+            startVideoFallback(videoRef.current.duration);
+        } else if (!isVideo && !isYouTubeVideo && !isPaused) {
+            const duration = (timerRemainingRef.current ?? playbackDurationMs(currentItem));
+            timerRemainingRef.current = null;
             timerDeadlineRef.current = Date.now() + duration;
             timerRef.current = setTimeout(() => {
                 timerRef.current = null;
@@ -565,12 +588,8 @@ export default function TVPlayer() {
         }
     };
 
-    // Helper para YouTube Embed
-    const getYouTubeEmbed = (url) => {
-        if (!url) return null;
-        const match = url.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|shorts\/))([\w-]{11})/);
-        return match ? `https://www.youtube.com/embed/${match[1]}?autoplay=1&mute=${isAudioUnlocked ? 0 : 1}&controls=0&loop=1&playlist=${match[1]}&enablejsapi=1` : null;
-    };
+    const handleCurrentVideoDuration = (durationSeconds) => startVideoFallback(durationSeconds);
+    const isYouTubeVideo = (item) => Boolean(getYouTubeVideoId(item?.source_url));
 
     const handleManualBind = (e) => {
         e.preventDefault();
@@ -732,18 +751,21 @@ export default function TVPlayer() {
                     )}
 
                     {/* YouTube Temporal */}
-                    {getYouTubeEmbed(temporaryContent.source_url) && (
-                        <iframe
-                            ref={tempIframeRef}
-                            className="tv-media-element tv-iframe-player"
-                            src={getYouTubeEmbed(temporaryContent.source_url)}
+                    {getYouTubeVideoId(temporaryContent.source_url) && (
+                        <YouTubePlayer
+                            url={temporaryContent.source_url}
                             title={temporaryContent.title}
-                            allow="autoplay; encrypted-media"
+                            iframeRef={tempIframeRef}
+                            paused={isPaused}
+                            muted={temporaryContent.muted === false ? false : !isAudioUnlocked}
+                            volume={volumeLevel}
+                            loop
+                            onEnded={handleTempVideoEnded}
                         />
                     )}
 
                     {/* Iframe / PowerBI Temporal */}
-                    {!getYouTubeEmbed(temporaryContent.source_url) && getMediaKind(temporaryContent) === 'iframe' && (
+                    {!getYouTubeVideoId(temporaryContent.source_url) && getMediaKind(temporaryContent) === 'iframe' && (
                         <iframe
                             ref={tempIframeRef}
                             className="tv-media-element tv-iframe-player"
@@ -772,6 +794,7 @@ export default function TVPlayer() {
                             onLoadedMetadata={(e) => {
                                 e.currentTarget.muted = !isAudioUnlocked;
                                 e.currentTarget.volume = volumeLevel;
+                                startVideoFallback(e.currentTarget.duration);
                             }}
                             onEnded={handleVideoEnded}
                             onError={handleVideoError}
@@ -789,19 +812,23 @@ export default function TVPlayer() {
                     )}
 
                     {/* YouTube */}
-                    {getYouTubeEmbed(currentItem.source_url) && (
-                        <iframe
-                            ref={iframeRef}
-                            className="tv-media-element tv-iframe-player"
-                            src={getYouTubeEmbed(currentItem.source_url)}
+                    {isYouTubeVideo(currentItem) && (
+                        <YouTubePlayer
+                            url={currentItem.source_url}
                             title={currentItem.title}
-                            onLoad={(e) => { if (isPaused) e.currentTarget.contentWindow?.postMessage(JSON.stringify({ event: 'command', func: 'pauseVideo', args: '' }), '*'); }}
-                            allow="autoplay; encrypted-media"
+                            iframeRef={iframeRef}
+                            paused={isPaused}
+                            muted={!isAudioUnlocked}
+                            volume={volumeLevel}
+                            loop={playlist.length <= 1}
+                            onEnded={handleVideoEnded}
+                            onDurationChange={handleCurrentVideoDuration}
+                            onError={handleVideoError}
                         />
                     )}
 
                     {/* IFrame Genérico (Power BI, URL Web) */}
-                    {!getYouTubeEmbed(currentItem.source_url) && getMediaKind(currentItem) === 'iframe' && (
+                    {!isYouTubeVideo(currentItem) && getMediaKind(currentItem) === 'iframe' && (
                         <iframe
                             ref={iframeRef}
                             className="tv-media-element tv-iframe-player"
