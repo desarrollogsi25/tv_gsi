@@ -4,22 +4,27 @@
 
 const express = require('express');
 const router = express.Router();
-const { pool } = require('../config/db');
+const db = require('../config/db');
+const { verifyDeviceToken } = require('../utils/deviceAuth');
 
-// Autenticación de Pantalla por UUID
+// Autenticación de Pantalla por UUID y Credencial de Dispositivo (RSK-025)
 router.post('/login', async (req, res) => {
-    const { tv_uuid } = req.body;
+    const { tv_uuid, device_token } = req.body;
     if (!tv_uuid) {
         return res.status(400).json({ success: false, message: 'UUID de TV requerido.' });
     }
 
+    const tokenHeader = req.headers['x-device-token'] ||
+        (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null);
+    const token = device_token || tokenHeader;
+
     try {
         const query = `
-            SELECT id, name, location, is_active 
-            FROM nexus_tv.tv_screens 
+            SELECT id, name, location, is_active, device_token_hash
+            FROM nexus_tv.tv_screens
             WHERE tv_uuid = $1
         `;
-        const result = await pool.query(query, [tv_uuid]);
+        const result = await db.pool.query(query, [tv_uuid]);
 
         if (result.rows.length === 0) {
             return res.status(401).json({ success: false, message: 'Dispositivo no registrado o UUID inválido.' });
@@ -27,15 +32,39 @@ router.post('/login', async (req, res) => {
 
         const screen = result.rows[0];
         if (!screen.is_active) {
-            return res.status(403).json({ 
-                success: false, 
-                message: 'La pantalla está pendiente de aprobación por el administrador.',
+            return res.status(403).json({
+                success: false,
+                message: 'La pantalla está pendiente de aprobación por el administrador o inactiva.',
                 pending: true
             });
         }
 
+        // Si la pantalla tiene credencial activa en BD, verificarla obligatoriamente
+        if (screen.device_token_hash) {
+            if (!token) {
+                return res.status(401).json({
+                    success: false,
+                    message: 'Credencial de dispositivo requerida.',
+                    requires_credentials: true
+                });
+            }
+            if (!verifyDeviceToken(token, screen.device_token_hash)) {
+                return res.status(401).json({
+                    success: false,
+                    message: 'Credencial de dispositivo inválida o revocada.'
+                });
+            }
+        } else {
+            // Pantalla sin credencial configurada (dispositivo antiguo o desvinculado)
+            return res.status(401).json({
+                success: false,
+                message: 'Pantalla sin credenciales activas. Se requiere revinculación administrativa por PIN.',
+                requires_pairing: true
+            });
+        }
+
         // Actualizar último login
-        await pool.query('UPDATE nexus_tv.tv_screens SET last_login = NOW() WHERE tv_uuid = $1', [tv_uuid]);
+        await db.pool.query('UPDATE nexus_tv.tv_screens SET last_login = NOW() WHERE tv_uuid = $1', [tv_uuid]);
 
         res.json({
             success: true,
@@ -67,17 +96,31 @@ router.get('/:tv_uuid/playlist', async (req, res) => {
     res.set('Expires', '0');
 
     try {
+        const deviceToken = req.get('X-Device-Token');
+        if (!deviceToken) {
+            return res.status(401).json({ success: false, message: 'Credencial de dispositivo requerida o inválida.' });
+        }
+
+        const screenRes = await db.pool.query(
+            'SELECT device_token_hash, is_active FROM nexus_tv.tv_screens WHERE tv_uuid = $1',
+            [tv_uuid]
+        );
+        const screen = screenRes.rows[0];
+        if (!screen || !screen.is_active || !verifyDeviceToken(deviceToken, screen.device_token_hash)) {
+            return res.status(401).json({ success: false, message: 'Credencial de dispositivo requerida o inválida.' });
+        }
+
         const query = `
-            SELECT 
+            SELECT
                 c.id AS content_id,
                 c.title,
-                c.source_url, 
-                c.source_type, 
-                c.content_type, 
+                c.source_url,
+                c.source_type,
+                c.content_type,
                 c.duration_seconds,
                 pc.position,
-                pc.start_time, 
-                pc.end_time, 
+                pc.start_time,
+                pc.end_time,
                 pc.days_of_week
             FROM nexus_tv.tv_screens AS ts
             JOIN nexus_tv.tv_playlist AS tp ON ts.id = tp.tv_id
@@ -107,7 +150,7 @@ router.get('/:tv_uuid/playlist', async (req, res) => {
             ORDER BY pc.position ASC, pc.start_time ASC NULLS FIRST, c.id ASC;
         `;
 
-        const result = await pool.query(query, [tv_uuid]);
+        const result = await db.pool.query(query, [tv_uuid]);
         res.json({
             success: true,
             playlist: result.rows,
@@ -130,11 +173,11 @@ router.post('/register', async (req, res) => {
 
     try {
         const checkQuery = 'SELECT id, is_active FROM nexus_tv.tv_screens WHERE tv_uuid = $1';
-        const existing = await pool.query(checkQuery, [tv_uuid]);
+        const existing = await db.pool.query(checkQuery, [tv_uuid]);
 
         if (existing.rows.length > 0) {
-            return res.json({ 
-                success: true, 
+            return res.json({
+                success: true,
                 message: 'El dispositivo ya existe.',
                 is_active: existing.rows[0].is_active
             });
@@ -145,7 +188,7 @@ router.post('/register', async (req, res) => {
             VALUES ($1, $2, $3, false, NOW())
             RETURNING id, tv_uuid, name, location, is_active
         `;
-        const inserted = await pool.query(insertQuery, [tv_uuid, name, location || 'Sin asignar']);
+        const inserted = await db.pool.query(insertQuery, [tv_uuid, name, location || 'Sin asignar']);
 
         res.status(201).json({
             success: true,
@@ -160,9 +203,25 @@ router.post('/register', async (req, res) => {
 
 // Heartbeat de telemetría de pantalla
 router.post('/heartbeat', async (req, res) => {
-    const { tv_uuid } = req.body;
+    const { tv_uuid, device_token } = req.body;
+    const token = device_token || req.headers['x-device-token'] ||
+        (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null);
+
     if (tv_uuid) {
-        await pool.query('UPDATE nexus_tv.tv_screens SET last_login = NOW() WHERE tv_uuid = $1', [tv_uuid]).catch(() => {});
+        try {
+            const screenRes = await db.pool.query(
+                'SELECT device_token_hash, is_active FROM nexus_tv.tv_screens WHERE tv_uuid = $1',
+                [tv_uuid]
+            );
+            if (screenRes.rows.length > 0 && screenRes.rows[0].is_active) {
+                const expectedHash = screenRes.rows[0].device_token_hash;
+                if (!expectedHash || (token && verifyDeviceToken(token, expectedHash))) {
+                    await db.pool.query('UPDATE nexus_tv.tv_screens SET last_login = NOW() WHERE tv_uuid = $1', [tv_uuid]);
+                }
+            }
+        } catch (_err) {
+            // Silently continue heartbeat
+        }
     }
     res.json({ success: true, timestamp: new Date().toISOString() });
 });
