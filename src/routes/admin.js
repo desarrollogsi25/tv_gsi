@@ -6,10 +6,13 @@ const express = require('express');
 const router = express.Router();
 const { pool } = require('../config/db');
 const { normalizeDaysOfWeek } = require('../utils/dateHelpers');
+const { requireRole } = require('../middlewares/auth');
+const { generateDeviceToken, hashDeviceToken } = require('../utils/deviceAuth');
+const { PairingSessionError } = require('../services/pairingSessionManager');
 
 let controlNamespace = null;
-let waitingScreensMap = null;
-let bindWaitingScreenFn = null;
+let pairingSessions = null;
+let adminPool = pool;
 let setTemporaryContentFn = null;
 let clearTemporaryContentFn = null;
 let getTemporaryStateFn = null;
@@ -17,8 +20,8 @@ let getTemporaryStateFn = null;
 function setNamespaces(opts) {
     if (opts) {
         controlNamespace = opts.controlNs;
-        waitingScreensMap = opts.waitingScreens;
-        bindWaitingScreenFn = opts.bindWaitingScreen;
+        pairingSessions = opts.pairingSessions || null;
+        adminPool = opts.pool || pool;
         setTemporaryContentFn = opts.setTemporaryContent;
         clearTemporaryContentFn = opts.clearTemporaryContent;
         getTemporaryStateFn = opts.getTemporaryState;
@@ -44,13 +47,13 @@ async function notifyPlaylistChanged(playlistId, payload = {}) {
 // ─────────────────────────────────────────────────────────
 
 // Listar pantallas detectadas en la red esperando que el admin les asigne un perfil
-router.get('/waiting-screens', (req, res) => {
-    const list = waitingScreensMap ? Array.from(waitingScreensMap.values()) : [];
+router.get('/waiting-screens', requireRole('admin', 'editor', 'viewer'), (req, res) => {
+    const list = pairingSessions ? pairingSessions.listPending() : [];
     res.json({ success: true, waiting: list });
 });
 
 // Listar los perfiles de pantallas preconfigurados en la base de datos (PT101, PT204, etc.)
-router.get('/available-profiles', async (req, res) => {
+router.get('/available-profiles', requireRole('admin', 'editor', 'viewer'), async (req, res) => {
     try {
         const query = `
             SELECT 
@@ -75,63 +78,107 @@ router.get('/available-profiles', async (req, res) => {
 });
 
 // Vincular una pantalla detectada con un perfil elegido por el administrador
-router.post('/bind-screen', async (req, res) => {
-    const { sessionCode, tv_uuid } = req.body;
+router.post('/bind-screen', requireRole('admin'), async (req, res) => {
+    const { pairingSessionId, tv_uuid } = req.body;
 
-    if (!sessionCode || !tv_uuid) {
-        return res.status(400).json({ success: false, message: 'sessionCode y tv_uuid requeridos.' });
+    if (!pairingSessionId || !tv_uuid) {
+        return res.status(400).json({ success: false, code: 'PAIRING_SESSION_ID_REQUIRED', message: 'pairingSessionId y tv_uuid requeridos.' });
     }
 
-    const normalizedSessionCode = String(sessionCode).toUpperCase();
-    const hasWaitingScreen = Array.from(waitingScreensMap?.values() || [])
-        .some((screen) => screen.sessionCode === normalizedSessionCode);
-    if (!hasWaitingScreen) {
-        return res.status(404).json({ success: false, message: 'Sesión de pantalla pendiente no encontrada.' });
+    if (typeof pairingSessionId !== 'string' || typeof tv_uuid !== 'string') {
+        return res.status(400).json({ success: false, code: 'INVALID_PAIRING_REQUEST', message: 'pairingSessionId y tv_uuid deben ser cadenas.' });
     }
 
     try {
-        const profileRes = await pool.query(`
-            SELECT ts.id, ts.tv_uuid, ts.name, ts.location, ts.is_active, p.id AS playlist_id, p.name AS playlist_name
-            FROM nexus_tv.tv_screens ts
-            LEFT JOIN nexus_tv.tv_playlist tp ON ts.id = tp.tv_id AND tp.is_primary = true
-            LEFT JOIN nexus_tv.playlists p ON tp.playlist_id = p.id
-            WHERE ts.tv_uuid = $1;
-        `, [tv_uuid]);
+        const result = await pairingSessions.bind(pairingSessionId, tv_uuid, async (_session, isBindingActive) => {
+            const client = await adminPool.connect();
+            let previousState;
+            try {
+                await client.query('BEGIN');
+                const profileRes = await client.query(`
+                    SELECT ts.id, ts.tv_uuid, ts.name, ts.location, ts.is_active, ts.last_login,
+                           ts.device_token_hash, ts.token_created_at,
+                           p.id AS playlist_id, p.name AS playlist_name
+                    FROM nexus_tv.tv_screens ts
+                    LEFT JOIN nexus_tv.tv_playlist tp ON ts.id = tp.tv_id AND tp.is_primary = true
+                    LEFT JOIN nexus_tv.playlists p ON tp.playlist_id = p.id
+                    WHERE ts.tv_uuid = $1
+                    FOR UPDATE OF ts;
+                `, [tv_uuid]);
 
-        if (profileRes.rows.length === 0) {
-            return res.status(404).json({ success: false, message: 'Perfil de pantalla no encontrado.' });
-        }
+                if (profileRes.rows.length === 0) {
+                    throw new PairingSessionError('PROFILE_NOT_FOUND', 'Perfil de pantalla no encontrado.', 404);
+                }
 
-        const profile = profileRes.rows[0];
+                const row = profileRes.rows[0];
+                const profile = {
+                    id: row.id,
+                    tv_uuid: row.tv_uuid,
+                    name: row.name,
+                    location: row.location,
+                    playlist_id: row.playlist_id,
+                    playlist_name: row.playlist_name
+                };
+                previousState = {
+                    id: row.id,
+                    is_active: row.is_active,
+                    last_login: row.last_login,
+                    device_token_hash: row.device_token_hash,
+                    token_created_at: row.token_created_at
+                };
 
-        // Actualizar último acceso y asegurar que esté activa
-        await pool.query('UPDATE nexus_tv.tv_screens SET is_active = true, last_login = NOW() WHERE tv_uuid = $1', [tv_uuid]);
+                const deviceToken = generateDeviceToken();
+                await client.query(
+                    'UPDATE nexus_tv.tv_screens SET is_active = true, last_login = NOW(), device_token_hash = $1, token_created_at = NOW() WHERE tv_uuid = $2',
+                    [hashDeviceToken(deviceToken), tv_uuid]
+                );
 
-        // Emitir después de persistir el perfil para que el primer login no vea el estado pendiente.
-        if (bindWaitingScreenFn) bindWaitingScreenFn(normalizedSessionCode, profile);
+                if (!isBindingActive()) {
+                    throw new PairingSessionError('PAIRING_SESSION_DISCONNECTED', 'La pantalla se desconectó durante la vinculación.', 410);
+                }
+                await client.query('COMMIT');
 
-        res.json({
-            success: true,
-            message: `Pantalla vinculada exitosamente con el perfil ${profile.name} (${profile.location}).`,
-            profile
+                return {
+                    profile,
+                    deviceToken,
+                    rollback: async () => {
+                        await adminPool.query(
+                            'UPDATE nexus_tv.tv_screens SET is_active=$1, last_login=$2, device_token_hash=$3, token_created_at=$4 WHERE id=$5',
+                            [previousState.is_active, previousState.last_login, previousState.device_token_hash, previousState.token_created_at, previousState.id]
+                        );
+                    }
+                };
+            } catch (error) {
+                try { await client.query('ROLLBACK'); } catch (_rollbackError) {}
+                throw error;
+            } finally {
+                client.release();
+            }
         });
+        return res.json(result);
     } catch (err) {
-        console.error('❌ Error vinculando pantalla:', err.message);
-        res.status(500).json({ success: false, message: 'Error interno al vincular la pantalla.' });
+        const status = Number.isInteger(err.status) ? err.status : 500;
+        if (status >= 500) console.error('❌ Error vinculando pantalla:', err.message);
+        return res.status(status).json({
+            success: false,
+            code: err.code || 'PAIRING_BIND_FAILED',
+            message: status >= 500 ? 'Error interno al vincular la pantalla.' : err.message
+        });
     }
 });
 
-// Rechazar una pantalla que está esperando una vinculación por PIN.
-router.post('/waiting-screens/:sessionCode/reject', (req, res) => {
-    const socketId = Array.from(waitingScreensMap?.values() || [])
-        .find((screen) => screen.sessionCode === String(req.params.sessionCode).toUpperCase())?.socketId;
-    if (!socketId || !controlNamespace) {
-        return res.status(404).json({ success: false, message: 'Sesión pendiente no encontrada.' });
+// Rechazar una sesión pendiente por su identidad, nunca por el PIN visible.
+router.post('/waiting-screens/:pairingSessionId/reject', requireRole('admin'), (req, res) => {
+    if (!pairingSessions || !controlNamespace) {
+        return res.status(503).json({ success: false, code: 'PAIRING_UNAVAILABLE', message: 'El servicio de emparejamiento no está disponible.' });
     }
-    const socket = controlNamespace.sockets.get(socketId);
-    socket?.emit('command:rejected', {});
-    socket?.disconnect(true);
-    return res.json({ success: true, message: 'Solicitud de vinculación rechazada.' });
+    try {
+        pairingSessions.reject(req.params.pairingSessionId);
+        return res.json({ success: true, message: 'Solicitud de vinculación rechazada.' });
+    } catch (err) {
+        const status = Number.isInteger(err.status) ? err.status : 500;
+        return res.status(status).json({ success: false, code: err.code || 'PAIRING_REJECT_FAILED', message: err.message });
+    }
 });
 
 // ─────────────────────────────────────────────────────────
@@ -139,7 +186,7 @@ router.post('/waiting-screens/:sessionCode/reject', (req, res) => {
 // ─────────────────────────────────────────────────────────
 
 // Listar todas las pantallas con su playlist asignada
-router.get('/screens', async (req, res) => {
+router.get('/screens', requireRole('admin', 'editor', 'viewer'), async (req, res) => {
     try {
         const query = `
             SELECT 
@@ -167,7 +214,7 @@ router.get('/screens', async (req, res) => {
 });
 
 // Detalle de una pantalla por UUID
-router.get('/screens/:uuid', async (req, res) => {
+router.get('/screens/:uuid', requireRole('admin', 'editor', 'viewer'), async (req, res) => {
     const { uuid } = req.params;
     try {
         const query = `
@@ -197,7 +244,7 @@ router.get('/screens/:uuid', async (req, res) => {
 });
 
 // Actualizar pantalla (nombre, ubicación, playlist y estado)
-router.put('/screens/:uuid', async (req, res) => {
+router.put('/screens/:uuid', requireRole('admin'), async (req, res) => {
     const { uuid } = req.params;
     const { name, location, playlist_id, is_active } = req.body;
 
@@ -257,13 +304,13 @@ router.put('/screens/:uuid', async (req, res) => {
 });
 
 // Desvincular una pantalla sin eliminar su perfil de la base de datos.
-router.post('/screens/:uuid/unlink', async (req, res) => {
+router.post('/screens/:uuid/unlink', requireRole('admin'), async (req, res) => {
     const { uuid } = req.params;
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
         const result = await client.query(
-            'UPDATE nexus_tv.tv_screens SET is_active = false WHERE tv_uuid = $1 RETURNING id',
+            'UPDATE nexus_tv.tv_screens SET is_active = false, device_token_hash = NULL WHERE tv_uuid = $1 RETURNING id',
             [uuid]
         );
         if (result.rows.length === 0) {
@@ -273,7 +320,10 @@ router.post('/screens/:uuid/unlink', async (req, res) => {
         await client.query('DELETE FROM nexus_tv.tv_playlist WHERE tv_id = $1', [result.rows[0].id]);
         await client.query('COMMIT');
         if (clearTemporaryContentFn) clearTemporaryContentFn(uuid);
-        if (controlNamespace) controlNamespace.to(`tv:${uuid}`).to(`screen_${uuid}`).emit('command:execute', { command: 'unlink', payload: {} });
+        if (controlNamespace) {
+            controlNamespace.to(`tv:${uuid}`).to(`screen_${uuid}`).emit('command:execute', { command: 'unlink', payload: {} });
+            controlNamespace.in(`tv:${uuid}`).disconnectSockets(true);
+        }
         return res.json({ success: true, message: 'Pantalla desvinculada y playlist retirada.' });
     } catch (err) {
         await client.query('ROLLBACK').catch(() => {});
@@ -285,7 +335,7 @@ router.post('/screens/:uuid/unlink', async (req, res) => {
 });
 
 // Eliminar un perfil de pantalla y sus relaciones asociadas de forma atómica.
-router.delete('/screens/:uuid', async (req, res) => {
+router.delete('/screens/:uuid', requireRole('admin'), async (req, res) => {
     const { uuid } = req.params;
     const client = await pool.connect();
     try {
@@ -299,7 +349,10 @@ router.delete('/screens/:uuid', async (req, res) => {
         await client.query('DELETE FROM nexus_tv.tv_screens WHERE id = $1', [result.rows[0].id]);
         await client.query('COMMIT');
         if (clearTemporaryContentFn) clearTemporaryContentFn(uuid);
-        if (controlNamespace) controlNamespace.to(`tv:${uuid}`).to(`screen_${uuid}`).emit('command:execute', { command: 'unlink', payload: {} });
+        if (controlNamespace) {
+            controlNamespace.to(`tv:${uuid}`).to(`screen_${uuid}`).emit('command:execute', { command: 'unlink', payload: {} });
+            controlNamespace.in(`tv:${uuid}`).disconnectSockets(true);
+        }
         return res.json({ success: true, message: 'Perfil de pantalla eliminado.' });
     } catch (err) {
         await client.query('ROLLBACK').catch(() => {});
@@ -311,7 +364,7 @@ router.delete('/screens/:uuid', async (req, res) => {
 });
 
 // Enviar comando de control remoto a una pantalla
-router.post('/screens/:uuid/control', (req, res) => {
+router.post('/screens/:uuid/control', requireRole('admin'), (req, res) => {
     const { uuid } = req.params;
     const { command, payload } = req.body;
 
@@ -334,7 +387,7 @@ router.post('/screens/:uuid/control', (req, res) => {
 });
 
 // Listar dispositivos pendientes de aprobación
-router.get('/pending', async (req, res) => {
+router.get('/pending', requireRole('admin', 'editor', 'viewer'), async (req, res) => {
     try {
         const query = `
             SELECT id, tv_uuid, name, location, created_at 
@@ -351,7 +404,7 @@ router.get('/pending', async (req, res) => {
 });
 
 // Aprobar dispositivo pendiente
-router.post('/approve/:uuid', async (req, res) => {
+router.post('/approve/:uuid', requireRole('admin'), async (req, res) => {
     const { uuid } = req.params;
     const { playlist_id } = req.body;
 
@@ -391,7 +444,7 @@ router.post('/approve/:uuid', async (req, res) => {
 // ─────────────────────────────────────────────────────────
 
 // Listar playlists con conteo de contenidos
-router.get('/playlists', async (req, res) => {
+router.get('/playlists', requireRole('admin', 'editor', 'viewer'), async (req, res) => {
     try {
         const query = `
             SELECT 
@@ -414,7 +467,7 @@ router.get('/playlists', async (req, res) => {
 });
 
 // Crear nueva playlist
-router.post('/playlists', async (req, res) => {
+router.post('/playlists', requireRole('admin', 'editor'), async (req, res) => {
     const { name, is_public } = req.body;
     if (!name) {
         return res.status(400).json({ success: false, message: 'El nombre de la playlist es obligatorio.' });
@@ -434,7 +487,7 @@ router.post('/playlists', async (req, res) => {
     }
 });
 
-router.put('/playlists/:id', async (req, res) => {
+router.put('/playlists/:id', requireRole('admin', 'editor'), async (req, res) => {
     const name = String(req.body.name || '').trim();
     if (!name) return res.status(400).json({ success: false, message: 'El nombre de la playlist es obligatorio.' });
     try {
@@ -450,7 +503,7 @@ router.put('/playlists/:id', async (req, res) => {
     }
 });
 
-router.delete('/playlists/:id', async (req, res) => {
+router.delete('/playlists/:id', requireRole('admin', 'editor'), async (req, res) => {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
@@ -478,7 +531,7 @@ router.delete('/playlists/:id', async (req, res) => {
 });
 
 // Obtener contenidos programados en una playlist
-router.get('/playlists/:id', async (req, res) => {
+router.get('/playlists/:id', requireRole('admin', 'editor', 'viewer'), async (req, res) => {
     const { id } = req.params;
     try {
         const playlistInfo = await pool.query('SELECT * FROM nexus_tv.playlists WHERE id = $1', [id]);
@@ -519,7 +572,7 @@ router.get('/playlists/:id', async (req, res) => {
 });
 
 // Asignar contenido a una playlist con horario
-router.post('/playlists/:id/items', async (req, res) => {
+router.post('/playlists/:id/items', requireRole('admin', 'editor'), async (req, res) => {
     const { id } = req.params;
     const { content_id, start_time, end_time, days_of_week } = req.body;
 
@@ -552,7 +605,7 @@ router.post('/playlists/:id/items', async (req, res) => {
     }
 });
 
-router.put('/playlists/:id/items/order', async (req, res) => {
+router.put('/playlists/:id/items/order', requireRole('admin', 'editor'), async (req, res) => {
     const { items } = req.body;
     if (!Array.isArray(items) || items.some((item) => !Number.isInteger(Number(item.id)))) {
         return res.status(400).json({ success: false, message: 'Se requiere una lista de IDs válida.' });
@@ -585,7 +638,7 @@ router.put('/playlists/:id/items/order', async (req, res) => {
 });
 
 // Eliminar contenido de una playlist
-router.delete('/playlists/:id/items/:contentId', async (req, res) => {
+router.delete('/playlists/:id/items/:contentId', requireRole('admin', 'editor'), async (req, res) => {
     const { id, contentId } = req.params;
     try {
         await pool.query('DELETE FROM nexus_tv.playlist_content WHERE playlist_id = $1 AND content_id = $2', [id, contentId]);
@@ -602,7 +655,7 @@ router.delete('/playlists/:id/items/:contentId', async (req, res) => {
 // ─────────────────────────────────────────────────────────
 
 // Emitir contenido temporal a una pantalla específica o a todas ('all')
-router.post('/temporary-content', async (req, res) => {
+router.post('/temporary-content', requireRole('admin'), async (req, res) => {
     const { target = 'all', content } = req.body;
 
     if (!content || !content.source_url) {
@@ -644,7 +697,7 @@ router.post('/temporary-content', async (req, res) => {
 });
 
 // Finalizar transmisión temporal y reanudar playlist normal
-router.post('/clear-temporary', async (req, res) => {
+router.post('/clear-temporary', requireRole('admin'), async (req, res) => {
     const { target = 'all' } = req.body;
 
     if (!clearTemporaryContentFn) {
@@ -671,13 +724,13 @@ router.post('/clear-temporary', async (req, res) => {
 });
 
 // Consultar transmisiones temporales activas en el sistema
-router.get('/active-temporary', (req, res) => {
+router.get('/active-temporary', requireRole('admin', 'editor', 'viewer'), (req, res) => {
     const state = getTemporaryStateFn ? getTemporaryStateFn() : { global: null, byScreen: {} };
     res.json({ success: true, state });
 });
 
 // Acciones remotas sobre el contenido temporal (play, pause, mute, unmute, volume)
-router.post('/temporary-control', (req, res) => {
+router.post('/temporary-control', requireRole('admin'), (req, res) => {
     const { target = 'all', action, payload = {} } = req.body;
 
     const allowedActions = new Set(['play', 'pause', 'resume', 'mute', 'unmute', 'volume', 'set_volume', 'chime', 'play_sound', 'test_sound']);
@@ -701,7 +754,7 @@ router.post('/temporary-control', (req, res) => {
 });
 
 // Alias para listar catálogo de contenidos multimedia desde admin
-router.get('/content', async (req, res) => {
+router.get('/content', requireRole('admin', 'editor', 'viewer'), async (req, res) => {
     try {
         const query = `
             SELECT id, title, description, source_url, source_type, content_type, duration_seconds, created_at
@@ -717,7 +770,7 @@ router.get('/content', async (req, res) => {
 });
 
 // Estadísticas para el panel de control
-router.get('/stats', async (req, res) => {
+router.get('/stats', requireRole('admin', 'editor', 'viewer'), async (req, res) => {
     try {
         const screensRes = await pool.query('SELECT COUNT(*) FROM nexus_tv.tv_screens');
         const activeScreensRes = await pool.query('SELECT COUNT(*) FROM nexus_tv.tv_screens WHERE is_active = true');

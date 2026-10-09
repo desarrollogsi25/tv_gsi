@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { API_URL } from '../Admin';
 import { showToast } from '../Toast';
@@ -6,7 +6,9 @@ import { showToast } from '../Toast';
 export default function TVRegister() {
     const [waitingScreens, setWaitingScreens] = useState([]);
     const [profiles, setProfiles] = useState([]);
-    const [selectedProfileByPin, setSelectedProfileByPin] = useState({});
+    const [selectedProfileBySession, setSelectedProfileBySession] = useState({});
+    const [busySessionIds, setBusySessionIds] = useState(() => new Set());
+    const pendingSessionIds = useRef(new Set());
     const [message, setMessage] = useState('');
 
     const loadData = async () => {
@@ -34,15 +36,18 @@ export default function TVRegister() {
         return () => clearInterval(interval);
     }, []);
 
-    const handleBindScreen = async (sessionCode) => {
-        const tvUuid = selectedProfileByPin[sessionCode] || (profiles[0] ? profiles[0].tv_uuid : null);
+    const handleBindScreen = async (pairingSessionId) => {
+        if (pendingSessionIds.current.has(pairingSessionId)) return;
+        const tvUuid = selectedProfileBySession[pairingSessionId] || (profiles[0] ? profiles[0].tv_uuid : null);
         if (!tvUuid) {
             return showToast('Por favor selecciona un usuario/perfil de pantalla para asignar.', 'warning');
         }
 
+        pendingSessionIds.current.add(pairingSessionId);
+        setBusySessionIds((current) => new Set(current).add(pairingSessionId));
         try {
             const res = await axios.post(`${API_URL}/api/admin/bind-screen`, {
-                sessionCode,
+                pairingSessionId,
                 tv_uuid: tvUuid
             });
 
@@ -53,16 +58,33 @@ export default function TVRegister() {
             }
         } catch (err) {
             setMessage('Error al vincular: ' + (err.response?.data?.message || err.message));
+        } finally {
+            pendingSessionIds.current.delete(pairingSessionId);
+            setBusySessionIds((current) => {
+                const next = new Set(current);
+                next.delete(pairingSessionId);
+                return next;
+            });
         }
     };
 
-    const handleRejectScreen = async (sessionCode) => {
+    const handleRejectScreen = async (pairingSessionId) => {
+        if (pendingSessionIds.current.has(pairingSessionId)) return;
+        pendingSessionIds.current.add(pairingSessionId);
+        setBusySessionIds((current) => new Set(current).add(pairingSessionId));
         try {
-            const res = await axios.post(`${API_URL}/api/admin/waiting-screens/${encodeURIComponent(sessionCode)}/reject`);
+            const res = await axios.post(`${API_URL}/api/admin/waiting-screens/${encodeURIComponent(pairingSessionId)}/reject`);
             showToast(res.data.message || 'Solicitud rechazada.', 'success');
             loadData();
         } catch (err) {
             showToast('Error al rechazar: ' + (err.response?.data?.message || err.message), 'error');
+        } finally {
+            pendingSessionIds.current.delete(pairingSessionId);
+            setBusySessionIds((current) => {
+                const next = new Set(current);
+                next.delete(pairingSessionId);
+                return next;
+            });
         }
     };
 
@@ -101,7 +123,7 @@ export default function TVRegister() {
                         </p>
                     </div>
                 ) : (
-                    <table className="nexus-table">
+                    <table className="nexus-table pairing-table">
                         <thead>
                             <tr>
                                 <th>PIN de Sesión</th>
@@ -112,22 +134,24 @@ export default function TVRegister() {
                         </thead>
                         <tbody>
                             {waitingScreens.map((tv) => (
-                                <tr key={tv.socketId}>
-                                    <td>
+                                <tr key={tv.pairingSessionId}>
+                                    <td data-label="PIN de sesión">
                                         <span className="badge" style={{ fontSize: '1.1rem', background: '#0071e3', color: '#fff', padding: '6px 12px' }}>
                                             #{tv.sessionCode}
                                         </span>
                                     </td>
-                                    <td>
+                                    <td data-label="Detectada">
                                         <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
                                             {new Date(tv.connectedAt).toLocaleTimeString('es-ES')}
                                         </span>
                                     </td>
-                                    <td>
+                                    <td data-label="Perfil asignado">
                                         <select
-                                            style={{ padding: '8px 12px', borderRadius: '10px', border: '1px solid var(--border-card)', fontSize: '0.95rem', minWidth: '240px' }}
-                                            value={selectedProfileByPin[tv.sessionCode] || ''}
-                                            onChange={(e) => setSelectedProfileByPin({ ...selectedProfileByPin, [tv.sessionCode]: e.target.value })}
+                                            className="pairing-profile-select"
+                                            disabled={busySessionIds.has(tv.pairingSessionId)}
+                                            style={{ padding: '8px 12px', borderRadius: '10px', border: '1px solid var(--border-card)', fontSize: '0.95rem' }}
+                                            value={selectedProfileBySession[tv.pairingSessionId] || ''}
+                                            onChange={(e) => setSelectedProfileBySession({ ...selectedProfileBySession, [tv.pairingSessionId]: e.target.value })}
                                         >
                                             <option value="">-- Elige un usuario preconfigurado --</option>
                                             {profiles.map((p) => (
@@ -137,17 +161,20 @@ export default function TVRegister() {
                                             ))}
                                         </select>
                                     </td>
-                                    <td>
+                                    <td data-label="Acciones">
+                                        <div className="pairing-actions">
                                         <button
                                             className="btn-primary"
                                             style={{ background: 'linear-gradient(135deg, #0071e3, #00c6ff)' }}
-                                            onClick={() => handleBindScreen(tv.sessionCode)}
+                                            disabled={busySessionIds.has(tv.pairingSessionId)}
+                                            onClick={() => handleBindScreen(tv.pairingSessionId)}
                                         >
-                                            🔗 Asignar y Activar TV
+                                            {busySessionIds.has(tv.pairingSessionId) ? '⏳ Vinculando…' : '🔗 Asignar y Activar TV'}
                                         </button>
-                                        <button className="btn-danger" style={{ marginLeft: '8px' }} onClick={() => handleRejectScreen(tv.sessionCode)}>
-                                            Rechazar
+                                        <button className="btn-danger" disabled={busySessionIds.has(tv.pairingSessionId)} onClick={() => handleRejectScreen(tv.pairingSessionId)}>
+                                            {busySessionIds.has(tv.pairingSessionId) ? '⏳ Procesando…' : 'Rechazar'}
                                         </button>
+                                        </div>
                                     </td>
                                 </tr>
                             ))}
@@ -163,7 +190,7 @@ export default function TVRegister() {
                     Perfiles registrados en el volcado maestro <code>nexus_tv.tv_screens</code> listos para ser asignados o probados.
                 </p>
 
-                <table className="nexus-table">
+                <table className="nexus-table pairing-table">
                     <thead>
                         <tr>
                             <th>Usuario / Pantalla</th>
@@ -176,11 +203,11 @@ export default function TVRegister() {
                     <tbody>
                         {profiles.map((p) => (
                             <tr key={p.id}>
-                                <td><strong>{p.name}</strong></td>
-                                <td>{p.location || 'No asignada'}</td>
-                                <td>{p.playlist_name || 'Sin playlist'}</td>
-                                <td><code style={{ fontSize: '0.8rem' }}>{p.tv_uuid}</code></td>
-                                <td>
+                            <td data-label="Pantalla"><strong>{p.name}</strong></td>
+                            <td data-label="Ubicación">{p.location || 'No asignada'}</td>
+                            <td data-label="Playlist">{p.playlist_name || 'Sin playlist'}</td>
+                            <td data-label="UUID"><code style={{ fontSize: '0.8rem' }}>{p.tv_uuid}</code></td>
+                            <td data-label="Prueba rápida">
                                     <a
                                         href={`/tv?uuid=${p.tv_uuid}`}
                                         target="_blank"

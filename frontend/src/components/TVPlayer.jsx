@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { io } from 'socket.io-client';
+import { createWaitingPairingSocket } from '../utils/waitingPairingSocket';
 import axios from 'axios';
 import { showConfirmation } from './Toast';
 import YouTubePlayer from './YouTubePlayer';
@@ -10,22 +11,23 @@ const API_BASE = import.meta.env.VITE_API_URL || '';
 
 export default function TVPlayer() {
     const [tvUuid, setTvUuid] = useState(localStorage.getItem('tv_uuid') || '');
+    const [deviceToken, setDeviceToken] = useState(() => localStorage.getItem('tv_device_token') || '');
     const [screenName, setScreenName] = useState('');
     const [screenLocation, setScreenLocation] = useState('');
     const [isRegistered, setIsRegistered] = useState(false);
     const [isRejected, setIsRejected] = useState(false);
 
-    // Audio Autoplay & Unlock State (Persistente en localStorage)
-    const [isAudioUnlocked, setIsAudioUnlocked] = useState(() => {
-        return localStorage.getItem('tv_audio_unlocked') === 'true';
-    });
+    // El permiso de audio del navegador es por sesión: no restaurar un unlock
+    // anterior de localStorage como autorización de autoplay con sonido.
+    const [isAudioUnlocked, setIsAudioUnlocked] = useState(false);
+    const [actualAudioState, setActualAudioState] = useState('muted');
     const [volumeLevel, setVolumeLevel] = useState(() => {
         const saved = localStorage.getItem('tv_volume');
         return saved !== null ? parseFloat(saved) : 0.8;
     });
 
     // Código de Sesión PIN para auto-vinculación remota
-    const [sessionPin] = useState(() => {
+    const [sessionPin, setSessionPin] = useState(() => {
         const saved = sessionStorage.getItem('tv_session_pin');
         if (saved) return saved;
         const generated = String(Math.floor(1000 + Math.random() * 9000));
@@ -167,6 +169,7 @@ export default function TVPlayer() {
     // ─────────────────────────────────────────────────────────
     const unlockAudio = (withChime = false) => {
         setIsAudioUnlocked(true);
+        setActualAudioState('unmuted');
         localStorage.setItem('tv_audio_unlocked', 'true');
 
         try {
@@ -246,7 +249,9 @@ export default function TVPlayer() {
     // ─────────────────────────────────────────────────────────
     const loadPlaylist = async (uuid) => {
         try {
-            const res = await axios.get(`${API_BASE}/api/tv/${uuid}/playlist?t=${Date.now()}`);
+            const token = localStorage.getItem('tv_device_token');
+            const headers = token ? { 'X-Device-Token': token } : {};
+            const res = await axios.get(`${API_BASE}/api/tv/${uuid}/playlist?t=${Date.now()}`, { headers });
             if (res.data.success && res.data.playlist.length > 0) {
                 const firstOrder = shuffleIndices(res.data.playlist.length, createSeededRandom(uuid));
                 setPlaylist(firstOrder.map((index) => res.data.playlist[index]));
@@ -255,6 +260,15 @@ export default function TVPlayer() {
                 setPlaylist([]);
             }
         } catch (err) {
+            if (err?.response?.status === 401) {
+                localStorage.removeItem('tv_device_token');
+                setDeviceToken('');
+                setIsRegistered(false);
+                setPlaylist([]);
+                setCurrentIndex(0);
+                console.warn('Credencial de pantalla ausente o rechazada; se requiere nueva vinculación.');
+                return;
+            }
             console.error('Error cargando playlist:', err);
         }
     };
@@ -276,7 +290,13 @@ export default function TVPlayer() {
 
         const verifyScreen = async () => {
             try {
-                const res = await axios.post(`${API_BASE}/api/tv/login`, { tv_uuid: activeUuid });
+                const storedToken = localStorage.getItem('tv_device_token');
+                const res = await axios.post(`${API_BASE}/api/tv/login`, {
+                    tv_uuid: activeUuid,
+                    device_token: storedToken
+                }, {
+                    headers: storedToken ? { 'X-Device-Token': storedToken } : {}
+                });
                 if (res.data.success) {
                     setIsRegistered(true);
                     setScreenName(res.data.screen.name);
@@ -284,7 +304,7 @@ export default function TVPlayer() {
                     loadPlaylist(activeUuid);
                 }
             } catch (err) {
-                console.warn('Pantalla no registrada en base de datos:', err);
+                console.warn('Pantalla no registrada o credencial inválida:', err?.response?.data?.message || err.message);
                 setIsRegistered(false);
             }
         };
@@ -296,25 +316,35 @@ export default function TVPlayer() {
     // WebSockets Hub de Control & Broadcast Temporal
     // ─────────────────────────────────────────────────────────
     useEffect(() => {
-        const controlSocket = io(`${API_BASE}/control`, {
-            query: isRegistered && tvUuid
-                ? { tv_uuid: tvUuid }
-                : { session_code: sessionPin, waiting_pairing: 'true' },
-            transports: ['websocket', 'polling'],
-            reconnection: true,
-            reconnectionDelay: 1000
+        const storedToken = localStorage.getItem('tv_device_token');
+        const isRegisteredTv = Boolean(isRegistered && tvUuid && storedToken);
+
+        let controlSocket = null;
+        let waitingPairingConnection = null;
+        const attachControlSocketHandlers = (socket) => {
+            controlSocket = socket;
+
+        socket.on('connect', () => {
+            if (isRegistered && tvUuid) socket.emit('register_screen', { tv_uuid: tvUuid });
         });
 
-        controlSocket.on('connect', () => {
-            if (isRegistered && tvUuid) controlSocket.emit('register_screen', { tv_uuid: tvUuid });
+        socket.on('connect_error', (err) => {
+            console.warn('⚠️ [Control Socket Error]:', err.message);
+            if (err.message && (err.message.includes('authentication failed') || err.message.includes('credentials') || err.message.includes('inactive'))) {
+                setIsRegistered(false);
+            }
         });
 
-        controlSocket.on('command:rejected', () => setIsRejected(true));
+        socket.on('command:rejected', () => setIsRejected(true));
 
         // 1. Asignación remota de usuario/perfil desde el Admin
-        controlSocket.on('command:assign_profile', (profile) => {
+        socket.on('command:assign_profile', (profile) => {
             console.log('🎉 Perfil asignado remotamente desde el Admin:', profile);
             localStorage.setItem('tv_uuid', profile.tv_uuid);
+            if (profile.device_token) {
+                localStorage.setItem('tv_device_token', profile.device_token);
+                setDeviceToken(profile.device_token);
+            }
             setTvUuid(profile.tv_uuid);
             setScreenName(profile.name);
             setScreenLocation(profile.location);
@@ -323,11 +353,13 @@ export default function TVPlayer() {
         });
 
         // 2. Comandos generales de control remoto
-        controlSocket.on('command:execute', ({ command, payload }) => {
+        socket.on('command:execute', ({ command, payload }) => {
             console.log(`🎮 Comando recibido: ${command}`, payload);
             if (command === 'unlink') {
                 localStorage.removeItem('tv_uuid');
+                localStorage.removeItem('tv_device_token');
                 setTvUuid('');
+                setDeviceToken('');
                 setIsRegistered(false);
                 setPlaylist([]);
                 setIsRejected(false);
@@ -343,6 +375,7 @@ export default function TVPlayer() {
                 unlockAudio(true);
             } else if (command === 'mute') {
                 setIsAudioUnlocked(false);
+                setActualAudioState('muted');
                 localStorage.setItem('tv_audio_unlocked', 'false');
                 if (videoRef.current) videoRef.current.muted = true;
                 if (tempVideoRef.current) tempVideoRef.current.muted = true;
@@ -354,6 +387,7 @@ export default function TVPlayer() {
                 if (tempVideoRef.current) tempVideoRef.current.volume = vol;
                 if (vol > 0) {
                     setIsAudioUnlocked(true);
+                    setActualAudioState('unmuted');
                     localStorage.setItem('tv_audio_unlocked', 'true');
                     if (videoRef.current && !isPausedRef.current) {
                         videoRef.current.muted = false;
@@ -365,6 +399,7 @@ export default function TVPlayer() {
                     }
                 } else {
                     setIsAudioUnlocked(false);
+                    setActualAudioState('muted');
                     localStorage.setItem('tv_audio_unlocked', 'false');
                     if (videoRef.current) videoRef.current.muted = true;
                     if (tempVideoRef.current) tempVideoRef.current.muted = true;
@@ -375,7 +410,7 @@ export default function TVPlayer() {
         });
 
         // 3. Inicio de Contenido Temporal en Vivo (Override de Playlist)
-        controlSocket.on('command:temporary_content', (content) => {
+        socket.on('command:temporary_content', (content) => {
             console.log('🚨 [Live Override] Contenido temporal recibido:', content);
             if (tempTimerRef.current) clearTimeout(tempTimerRef.current);
             tempTimerRemainingRef.current = null;
@@ -404,7 +439,7 @@ export default function TVPlayer() {
         });
 
         // 4. Finalización de Contenido Temporal -> Reanudar Playlist
-        controlSocket.on('command:clear_temporary', () => {
+        socket.on('command:clear_temporary', () => {
             console.log('⏹️ [Live Override] Quitando contenido temporal, reanudando playlist.');
             if (tempTimerRef.current) clearTimeout(tempTimerRef.current);
             tempTimerRef.current = null;
@@ -414,7 +449,7 @@ export default function TVPlayer() {
         });
 
         // 5. Acciones remotas específicas sobre el contenido temporal
-        controlSocket.on('command:temporary_action', ({ action, payload }) => {
+        socket.on('command:temporary_action', ({ action, payload }) => {
             console.log(`🎮 [Live Override Action] '${action}':`, payload);
             if (action === 'play' || action === 'resume') {
                 resumePlayback();
@@ -424,6 +459,7 @@ export default function TVPlayer() {
                 unlockAudio(true);
             } else if (action === 'mute') {
                 if (tempVideoRef.current) tempVideoRef.current.muted = true;
+                setActualAudioState('muted');
             } else if (action === 'volume' || action === 'set_volume') {
                 const vol = Math.max(0, Math.min(1, payload?.volume !== undefined ? payload.volume : (payload?.level ?? 80) / 100));
                 setVolumeLevel(vol);
@@ -433,22 +469,47 @@ export default function TVPlayer() {
                     if (vol > 0) {
                         tempVideoRef.current.muted = false;
                         setIsAudioUnlocked(true);
+                        setActualAudioState('unmuted');
                         localStorage.setItem('tv_audio_unlocked', 'true');
                     } else {
                         tempVideoRef.current.muted = true;
+                        setActualAudioState('muted');
                     }
                 }
             } else if (action === 'chime' || action === 'test_sound' || action === 'play_sound') {
                 playChime();
             }
         });
+        };
+
+        if (isRegisteredTv) {
+            controlSocket = io(`${API_BASE}/control`, {
+                auth: { tv_uuid: tvUuid, device_token: storedToken },
+                query: {},
+                transports: ['websocket', 'polling'],
+                reconnection: true,
+                reconnectionDelay: 1000
+            });
+            attachControlSocketHandlers(controlSocket);
+        } else {
+            waitingPairingConnection = createWaitingPairingSocket({
+                apiBase: API_BASE,
+                sessionPin,
+                onSessionPinChange: setSessionPin,
+                onSocket: attachControlSocketHandlers
+            });
+        }
 
         // Heartbeat periódico HTTP y WebSocket con telemetría de audio
         const hbInterval = setInterval(() => {
+            const storedToken = localStorage.getItem('tv_device_token');
             if (isRegistered && tvUuid) {
                 axios.post(`${API_BASE}/api/tv/heartbeat`, {
                     tv_uuid: tvUuid,
+                    device_token: storedToken,
                     is_override: !!temporaryContentRef.current
+                }, {
+                    headers: storedToken ? { 'X-Device-Token': storedToken } : {}
                 }).catch(() => {});
 
                 controlSocket.emit('tv:heartbeat', {
@@ -462,12 +523,13 @@ export default function TVPlayer() {
         }, 15000);
 
         return () => {
-            controlSocket.disconnect();
+            if (waitingPairingConnection) waitingPairingConnection.disconnect();
+            else controlSocket?.disconnect();
             if (tempTimerRef.current) clearTimeout(tempTimerRef.current);
             clearInterval(hbInterval);
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [tvUuid, isRegistered, sessionPin]);
+    }, [tvUuid, isRegistered]);
 
     // ─────────────────────────────────────────────────────────
     // Transición de Contenido de Playlist Normal
@@ -525,8 +587,15 @@ export default function TVPlayer() {
     };
 
     const handleVideoError = (err) => {
-        console.warn('Video playback error, auto-advancing:', err);
-        setTimeout(handleNext, 2000);
+        console.warn('Video playback error:', err);
+        if (playlist.length <= 1) {
+            console.warn('[TVPlayer] Playlist con elemento unico con error. Esperando 10s antes de reintentar para evitar bucle agresivo...');
+            setTimeout(() => {
+                setPlaybackCycle((c) => c + 1);
+            }, 10000);
+        } else {
+            setTimeout(handleNext, 2000);
+        }
     };
 
     const handleImageError = () => {
@@ -608,7 +677,9 @@ export default function TVPlayer() {
             confirmText: 'Desvincular',
             onAccept: () => {
                 localStorage.removeItem('tv_uuid');
+                localStorage.removeItem('tv_device_token');
                 setTvUuid('');
+                setDeviceToken('');
                 setIsRegistered(false);
                 setPlaylist([]);
                 window.location.reload();
@@ -701,9 +772,13 @@ export default function TVPlayer() {
     return (
         <div className="tv-player-container" onClick={unlockAudio} tabIndex={0}>
             {/* Banner de Desbloqueo de Audio si el navegador lo bloqueó */}
-            {!isAudioUnlocked && (
+            {(!isAudioUnlocked || actualAudioState === 'blocked') && (
                 <div className="tv-audio-unlock-banner" onClick={(e) => { e.stopPropagation(); unlockAudio(); }}>
-                    <span>🔊 Audio Silenciado por Política del Navegador</span>
+                    <span>
+                        {actualAudioState === 'blocked'
+                            ? '⚠️ Audio Silenciado por Política del Navegador (Haga clic para habilitar sonido)'
+                            : '🔊 Audio Silenciado por Política del Navegador'}
+                    </span>
                     <button className="tv-btn-unlock-sound">Activar Sonido</button>
                 </div>
             )}
@@ -761,6 +836,7 @@ export default function TVPlayer() {
                             volume={volumeLevel}
                             loop
                             onEnded={handleTempVideoEnded}
+                            onAudioStateChange={setActualAudioState}
                         />
                     )}
 
@@ -824,6 +900,7 @@ export default function TVPlayer() {
                             onEnded={handleVideoEnded}
                             onDurationChange={handleCurrentVideoDuration}
                             onError={handleVideoError}
+                            onAudioStateChange={setActualAudioState}
                         />
                     )}
 
@@ -856,8 +933,10 @@ export default function TVPlayer() {
                     <span className="tv-dot-online" />
                     <span>{screenName} • {screenLocation || 'Sala'}</span>
                     <span style={{ opacity: 0.7, margin: '0 4px' }}>|</span>
-                    <span style={{ color: isAudioUnlocked ? '#34c759' : '#ff9500' }}>
-                        {isAudioUnlocked ? '🔊 Audio Activo' : '🔇 Silenciado'}
+                    <span style={{
+                        color: actualAudioState === 'unmuted' ? '#34c759' : actualAudioState === 'blocked' ? '#ff3b30' : '#ff9500'
+                    }}>
+                        {actualAudioState === 'unmuted' ? '🔊 Audio Activo' : actualAudioState === 'blocked' ? '⚠️ Audio Bloqueado' : '🔇 Silenciado'}
                     </span>
                     {temporaryContent && (
                         <>

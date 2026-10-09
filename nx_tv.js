@@ -22,6 +22,7 @@ const { router: adminRoutes, setNamespaces } = require('./src/routes/admin');
 const { router: mediaRoutes, mediaDirectory: mediaDirFromRoute } = require('./src/routes/media');
 const authRoutes = require('./src/routes/auth');
 const authMiddleware = require('./src/middlewares/auth');
+const { createApiCorsOptions } = require('./src/config/cors');
 
 // Services
 const { initCronJobs } = require('./src/services/cron');
@@ -49,21 +50,15 @@ const io = new Server(server, {
 });
 
 // Inicializar hub de control con auto-descubrimiento y contenido temporal
-const { controlNs, waitingScreens, bindWaitingScreen, setTemporaryContent, clearTemporaryContent, getTemporaryState } = initSockets(io);
+const { controlNs, pairingSessions, setTemporaryContent, clearTemporaryContent, getTemporaryState } = initSockets(io);
 
 // Inyectar namespaces y vinculador en las rutas admin
-setNamespaces({ controlNs, waitingScreens, bindWaitingScreen, setTemporaryContent, clearTemporaryContent, getTemporaryState });
+setNamespaces({ controlNs, pairingSessions, setTemporaryContent, clearTemporaryContent, getTemporaryState });
 
 // ═══════════════════════════════════════
 // Middleware
 // ═══════════════════════════════════════
-app.use(cors({
-  origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
-    return callback(new Error('Bloqueado por política CORS de Nexus TV'));
-  },
-  credentials: true
-}));
+app.use(cors(createApiCorsOptions(allowedOrigins)));
 app.use(express.json({ limit: '300mb' }));
 app.use(express.urlencoded({ extended: true, limit: '300mb' }));
 
