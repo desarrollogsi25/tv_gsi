@@ -1,9 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const jwt = require('jsonwebtoken');
+const JWT_SECRET = process.env.JWT_SECRET || require('crypto').randomBytes(32).toString('hex');
+process.env.JWT_SECRET = JWT_SECRET;
 const authMiddleware = require('../src/middlewares/auth');
-
-const JWT_SECRET = process.env.JWT_SECRET || 'nexus-tv-jwt-secret-key-2026';
 
 test('authMiddleware - responde 401 si falta header Authorization', (t, done) => {
     const req = { headers: {} };

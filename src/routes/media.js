@@ -9,6 +9,7 @@ const path = require('path');
 const fs = require('fs');
 const ffmpeg = require('fluent-ffmpeg');
 const { pool, mediaDirectory } = require('../config/db');
+const { requireRole } = require('../middlewares/auth');
 
 // Configuración de almacenamiento Multer
 const storage = multer.diskStorage({
@@ -29,7 +30,7 @@ const upload = multer({
 });
 
 // Listar todos los contenidos de la biblioteca
-router.get('/', async (req, res) => {
+router.get('/', requireRole('admin', 'editor', 'viewer'), async (req, res) => {
     try {
         const query = `
             SELECT id, title, description, source_url, source_type, content_type, duration_seconds, created_at
@@ -45,7 +46,7 @@ router.get('/', async (req, res) => {
 });
 
 // Subir archivo local (Video o Imagen)
-router.post('/upload', upload.single('mediaFile'), async (req, res) => {
+router.post('/upload', requireRole('admin', 'editor'), upload.single('mediaFile'), async (req, res) => {
     if (!req.file) {
         return res.status(400).json({ success: false, message: 'No se ha subido ningún archivo.' });
     }
@@ -95,7 +96,7 @@ router.post('/upload', upload.single('mediaFile'), async (req, res) => {
 });
 
 // Registrar URL Externa (Power BI, YouTube, Dashboard Web)
-router.post('/external', async (req, res) => {
+router.post('/external', requireRole('admin', 'editor'), async (req, res) => {
     const { title, source_url, content_type, duration_seconds, description } = req.body;
 
     if (!title || !source_url) {
@@ -120,7 +121,7 @@ router.post('/external', async (req, res) => {
 });
 
 // Eliminar contenido de la biblioteca y disco
-router.post('/delete', async (req, res) => {
+router.post('/delete', requireRole('admin', 'editor'), async (req, res) => {
     const { content_id, fileUrl } = req.body;
 
     try {
