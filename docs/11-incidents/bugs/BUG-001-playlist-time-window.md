@@ -4,8 +4,9 @@
 - **Severidad:** Alta
 - **Prioridad:** P0
 - **Fecha de Detección:** 2026-10-08
-- **Estado:** Confirmado (Pendiente de Corrección)
+- **Estado:** ⚪ Histórico / Superado por Versión Validada (Ver [BUG-001-schedule-ignored.md](file:///c:/Users/DEVELOPMENT/Downloads/tv_gsi/docs/11-incidents/bugs/BUG-001-schedule-ignored.md))
 - **Reportado por:** QA Lead & Senior Software Architect
+- **Nota Documental:** Este reporte corresponde al borrador preliminar de detección. La versión canónica con resolución y evidencias de validación se encuentra en [BUG-001-schedule-ignored.md](file:///c:/Users/DEVELOPMENT/Downloads/tv_gsi/docs/11-incidents/bugs/BUG-001-schedule-ignored.md).
 
 ---
 
