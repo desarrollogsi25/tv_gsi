@@ -145,9 +145,9 @@ elseif ($Option -eq "5") {
 }
 elseif ($Option -eq "6") {
     Write-Host ""
-    Write-Host "[+] Deteniendo y limpiando contenedores locales de Nexus TV (tv-db, tv-backend, tv-frontend)..." -ForegroundColor $Yellow
-    docker compose -f $ComposeFile down -v --remove-orphans
-    Write-Host "[OK] Entorno local detenido y limpiado exitosamente (otros contenedores en Docker se mantienen intactos)." -ForegroundColor $Green
+    Write-Host "[+] Deteniendo contenedores locales de Nexus TV (preservando volumen de base de datos)..." -ForegroundColor $Yellow
+    docker compose -f $ComposeFile down --remove-orphans
+    Write-Host "[OK] Entorno local detenido exitosamente (los datos de PostgreSQL se conservan intactos)." -ForegroundColor $Green
 }
 elseif ($Option -eq "7") {
     Write-Host ""
