@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const { pool } = require('../config/db');
+const db = require('../config/db');
 const authMiddleware = require('../middlewares/auth');
 
 const JWT_SECRET = require('../config/jwt');
@@ -20,7 +20,7 @@ router.post('/login', async (req, res) => {
 
     try {
         const query = 'SELECT id, username, email, role, password_hash FROM nexus_tv.users WHERE username = $1;';
-        const result = await pool.query(query, [username]);
+        const result = await db.pool.query(query, [username]);
 
         if (result.rows.length === 0) {
             return res.status(401).json({

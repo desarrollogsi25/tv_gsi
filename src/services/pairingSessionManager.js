@@ -14,6 +14,8 @@ class PairingSessionError extends Error {
 
 function createPairingSessionManager(controlNs, options = {}) {
     const ttlMs = options.ttlMs ?? PAIRING_SESSION_TTL_MS;
+    const ackTimeoutMs = options.ackTimeoutMs ?? 5000;
+    const maxRetries = options.maxRetries ?? 1;
     const now = options.now || Date.now;
     const schedule = options.setTimeout || setTimeout;
     const cancel = options.clearTimeout || clearTimeout;
@@ -122,6 +124,122 @@ function createPairingSessionManager(controlNs, options = {}) {
         }
     }
 
+    async function deliverWithConfirmation(socket, session, bindingResult) {
+        const payload = {
+            ...bindingResult.profile,
+            device_token: bindingResult.deviceToken,
+            pairingSessionId: session.pairingSessionId
+        };
+        const attemptTimeoutMs = Math.max(50, Math.floor(ackTimeoutMs / (maxRetries + 1)));
+
+        const attemptDelivery = (attemptNumber) => new Promise((resolve, reject) => {
+            let settled = false;
+            let ackTimer = null;
+
+            const cleanup = () => {
+                if (ackTimer) cancel(ackTimer);
+                socket.off('tv:pairing_confirmed', onConfirmed);
+                socket.off('tv:pairing_rejected', onRejected);
+                socket.off('disconnect', onDisconnectHandler);
+            };
+
+            const settleSuccess = (data) => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                resolve(data);
+            };
+
+            const settleFailure = (err) => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                reject(err);
+            };
+
+            const onConfirmed = (data) => {
+                if (!data || data.pairingSessionId !== session.pairingSessionId) return;
+                if (data.tv_uuid && data.tv_uuid !== session.targetTvUuid) {
+                    return settleFailure(new PairingSessionError(
+                        'PAIRING_CONFIRMATION_MISMATCH',
+                        'Confirmación no coincide con el perfil asignado.',
+                        400
+                    ));
+                }
+                settleSuccess(data);
+            };
+
+            const onRejected = (data) => {
+                if (!data || data.pairingSessionId !== session.pairingSessionId) return;
+                settleFailure(new PairingSessionError(
+                    'PAIRING_CONFIRMATION_REJECTED',
+                    data.reason || data.message || 'La pantalla rechazó la asignación del perfil.',
+                    422
+                ));
+            };
+
+            const onDisconnectHandler = () => {
+                settleFailure(new PairingSessionError(
+                    'PAIRING_SESSION_DISCONNECTED',
+                    'La pantalla se desconectó durante la confirmación.',
+                    410
+                ));
+            };
+
+            socket.on('tv:pairing_confirmed', onConfirmed);
+            socket.on('tv:pairing_rejected', onRejected);
+            socket.once('disconnect', onDisconnectHandler);
+
+            ackTimer = schedule(() => {
+                settleFailure(new PairingSessionError(
+                    'PAIRING_CONFIRMATION_TIMEOUT',
+                    `Tiempo de espera agotado esperando confirmación de la pantalla (intento ${attemptNumber}).`,
+                    408
+                ));
+            }, attemptTimeoutMs);
+            ackTimer.unref?.();
+
+            try {
+                socket.emit('command:assign_profile', payload, (response) => {
+                    if (response && response.success === false) {
+                        settleFailure(new PairingSessionError(
+                            'PAIRING_CONFIRMATION_REJECTED',
+                            response.error || response.reason || 'La pantalla no pudo almacenar las credenciales.',
+                            422
+                        ));
+                    } else if (response && (response.success === true || response.tv_uuid === session.targetTvUuid)) {
+                        settleSuccess(response);
+                    }
+                });
+            } catch (emitErr) {
+                settleFailure(emitErr);
+            }
+        });
+
+        let lastErr = null;
+        for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+            if (!socket.connected) {
+                throw new PairingSessionError('PAIRING_SESSION_DISCONNECTED', 'La pantalla se desconectó.', 410);
+            }
+            if (now() >= session.deadline) {
+                throw new PairingSessionError('PAIRING_SESSION_EXPIRED', 'La sesión expiró antes de la confirmación.', 410);
+            }
+
+            try {
+                await attemptDelivery(attempt);
+                return;
+            } catch (err) {
+                lastErr = err;
+                if (err.code === 'PAIRING_CONFIRMATION_REJECTED' ||
+                    err.code === 'PAIRING_SESSION_DISCONNECTED' ||
+                    err.code === 'PAIRING_CONFIRMATION_MISMATCH') {
+                    throw err;
+                }
+            }
+        }
+        throw lastErr;
+    }
+
     async function bind(pairingSessionId, tvUuid, performBinding) {
         const session = sessions.get(pairingSessionId);
         if (!session) throw new PairingSessionError('PAIRING_SESSION_NOT_FOUND', 'Sesión de emparejamiento no encontrada.', 404);
@@ -166,10 +284,15 @@ function createPairingSessionManager(controlNs, options = {}) {
                     throw new PairingSessionError('PAIRING_SESSION_EXPIRED', 'La sesión dejó de estar activa durante la vinculación.', 410);
                 }
 
-                socket.volatile.emit('command:assign_profile', {
-                    ...bindingResult.profile,
-                    device_token: bindingResult.deviceToken
-                });
+                await deliverWithConfirmation(socket, session, bindingResult);
+
+                // ── Promover credencial pendiente (Segunda transacción corta) ──
+                if (typeof bindingResult.promote === 'function') {
+                    await bindingResult.promote();
+                } else if (typeof bindingResult.commit === 'function') {
+                    await bindingResult.commit();
+                }
+
                 session.status = 'bound';
                 session.result = {
                     success: true,
@@ -184,19 +307,39 @@ function createPairingSessionManager(controlNs, options = {}) {
                 });
                 return { ...session.result, alreadyBound: false };
             } catch (error) {
-                if (bindingResult?.rollback && session.status !== 'bound') {
-                    await bindingResult.rollback();
+                let rollbackError = null;
+                if (session.status !== 'bound') {
+                    const cancelFn = bindingResult?.cancel || bindingResult?.rollback;
+                    if (typeof cancelFn === 'function') {
+                        try {
+                            await cancelFn();
+                            session.rollbackCompleted = true;
+                        } catch (rollbackErr) {
+                            rollbackError = rollbackErr;
+                            session.rollbackCompleted = false;
+                            session.rollbackFailed = true;
+                            session.rollbackError = rollbackErr.message || String(rollbackErr);
+                            console.error('❌ Error cancelando vinculación pendiente:', rollbackErr.message);
+                        }
+                    }
                 }
                 if (session.status === 'binding') {
                     session.targetTvUuid = null;
                     session.operationPromise = null;
-                    if (socket.connected && now() < session.deadline) {
+                    if (rollbackError) {
+                        session.status = 'failed';
+                        expire(session, 'rollback_failed');
+                    } else if (socket.connected && now() < session.deadline) {
                         session.status = 'pending';
                         session.timer = schedule(() => expire(session), session.deadline - now());
                         session.timer.unref?.();
                     } else {
                         expire(session, socket.connected ? 'expired' : 'disconnected');
                     }
+                }
+                if (rollbackError) {
+                    error.rollbackFailed = true;
+                    error.rollbackError = rollbackError;
                 }
                 throw error;
             }

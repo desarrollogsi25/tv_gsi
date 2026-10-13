@@ -59,9 +59,34 @@ function initCronJobs() {
                 console.log(`✅ [Cron Cleanup] ${cleaned} archivos huérfanos eliminados.`);
             }
         } catch (err) {
-            console.error('⚠️ [Cron Error] Fallo en limpieza programada:', err.message);
+            console.error('⚠️ [Cron Error] Fallo en limpieza de media:', err.message);
         }
     });
+    // Tarea 3: Reconciliación automática periódica de vinculaciones pendientes (cada 1 minuto)
+    cron.schedule('* * * * *', async () => {
+        try {
+            const { reconcilePendingPairings } = require('../routes/admin');
+            const expiredCount = await reconcilePendingPairings(pool);
+            if (expiredCount > 0) {
+                console.log(`🧹 [Cron Reconciliation] ${expiredCount} vinculaciones pendientes vencidas marcadas como expired.`);
+            }
+        } catch (err) {
+            console.error('⚠️ [Cron Error] Fallo en reconciliación de vinculaciones:', err.message);
+        }
+    });
+
+    // Reconciliación inmediata al arranque para limpiar sesiones huérfanas tras reinicios o caídas
+    (async () => {
+        try {
+            const { reconcilePendingPairings } = require('../routes/admin');
+            const count = await reconcilePendingPairings(pool);
+            if (count > 0) {
+                console.log(`🧹 [Boot Reconciliation] ${count} vinculaciones pendientes vencidas reconciliadas al iniciar.`);
+            }
+        } catch (err) {
+            console.warn('⚠️ [Boot Reconciliation] No se pudo ejecutar reconciliación inicial:', err.message);
+        }
+    })();
 }
 
 module.exports = {

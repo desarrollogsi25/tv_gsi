@@ -17,21 +17,60 @@ const screenTemporaryContent = new Map(); // tv_uuid -> content
 
 function initSockets(io, opts = {}) {
     const activePool = opts?.pool || defaultDb.pool;
+    const allowQueryDeviceToken = opts.allowQueryDeviceToken !== undefined
+        ? Boolean(opts.allowQueryDeviceToken)
+        : (process.env.ALLOW_QUERY_DEVICE_TOKEN === 'true');
+    // Observación sin aceptación (AUD-006 / MISIÓN 4C): detecta intentos de uso
+    // del canal obsoleto en query string MANTENIENDO el rechazo. Nunca activa
+    // por sí misma el fallback; no registra tokens ni URIs completas.
+    const observeQueryDeviceToken = !!opts.observeQueryDeviceToken;
 
     // ─────────────────────────────────────────────────────────
     // Namespace: /control (Comandos, Broadcast y Auto-Detección)
     // ─────────────────────────────────────────────────────────
     const controlNs = io.of('/control');
-    const pairingSessions = createPairingSessionManager(controlNs, { ttlMs: opts.pairingTtlMs });
+    const pairingSessions = createPairingSessionManager(controlNs, {
+        ttlMs: opts.pairingTtlMs,
+        ackTimeoutMs: opts.pairingAckTimeoutMs,
+        maxRetries: opts.pairingMaxRetries
+    });
 
     controlNs.use(async (socket, next) => {
         try {
             const auth = socket.handshake.auth || {};
             const query = socket.handshake.query || {};
+            const headers = socket.handshake.headers || {};
 
             // 1. Extraer identificadores y credenciales
             const tvUuid = auth.tv_uuid || query.tv_uuid;
-            const deviceToken = auth.device_token || query.device_token || socket.handshake.headers?.['x-device-token'];
+            const authDeviceToken = auth.device_token || headers['x-device-token'];
+            const queryDeviceToken = query.device_token;
+
+            // Control de credencial sensible en query string (AUD-006)
+            if (queryDeviceToken && !allowQueryDeviceToken) {
+                // Observación sin aceptación (MISIÓN 4C): aunque el fallback está
+                // deshabilitado, se puede registrar que un cliente intentó usar el
+                // canal obsoleto. Se registra únicamente el tv_uuid (si pasa el
+                // filtro de formato) y el canal de fallback; jamás el token ni la URI.
+                if (observeQueryDeviceToken && isValidUuid(tvUuid || '')) {
+                    const authChannel = authDeviceToken
+                        ? 'coexiste con auth/header (rechazada query)'
+                        : 'query string exclusiva (rechazada)';
+                    console.warn(`⚠️ [Observación AUD-006] Intento rechazado de device_token en query string (tv_uuid: ${tvUuid}, fallback_habilitado: false, canal: ${authChannel}).`);
+                }
+                return next(new Error('TV authentication failed: device_token in query string is rejected. Use handshake auth or x-device-token header'));
+            }
+
+            // Telemetría de retiro AUD-006: se advierte siempre que el cliente envíe
+            // device_token en la query string bajo el fallback habilitado, incluso si
+            // además envía auth/header. Así el inventario de dispositivos legacy no se
+            // oculta cuando un cliente transitorio envía ambos canales.
+            if (queryDeviceToken && allowQueryDeviceToken) {
+                const channel = authDeviceToken ? 'auth/header (query ignorada)' : 'query string (fallback activo)';
+                console.warn(`⚠️ [Deprecation Warning AUD-006] TV connection using deprecated query string device_token detected (tv_uuid: ${tvUuid || 'unknown'}, channel: ${channel}). Query authentication will be removed in a future release; migrate client to handshake auth.`);
+            }
+
+            const deviceToken = authDeviceToken || (allowQueryDeviceToken ? queryDeviceToken : undefined);
             const isWaiting = auth.waiting_pairing === 'true' || query.waiting_pairing === 'true';
             const sessionCode = auth.session_code || query.session_code;
             const adminToken = auth.token;

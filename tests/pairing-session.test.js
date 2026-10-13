@@ -19,6 +19,7 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function makePool({ updateDelayMs = 0 } = {}) {
     const writes = [];
+    const pendingPairings = new Map();
     const profiles = new Map([
         [PROFILE_A, { id: 1, tv_uuid: PROFILE_A, name: 'Profile A', location: 'Test A', is_active: false, last_login: null, device_token_hash: null, token_created_at: null, playlist_id: null, playlist_name: null }],
         [PROFILE_B, { id: 2, tv_uuid: PROFILE_B, name: 'Profile B', location: 'Test B', is_active: false, last_login: null, device_token_hash: null, token_created_at: null, playlist_id: null, playlist_name: null }]
@@ -28,7 +29,49 @@ function makePool({ updateDelayMs = 0 } = {}) {
             const profile = profiles.get(params[0]);
             return { rows: profile ? [{ ...profile }] : [] };
         }
-        if (/UPDATE nexus_tv\.tv_screens SET is_active = true/i.test(sql)) {
+        if (/INSERT INTO nexus_tv\.pending_pairings/i.test(sql)) {
+            const [tv_uuid, pairing_session_id, pending_hash] = params;
+            pendingPairings.set(pairing_session_id, {
+                id: pendingPairings.size + 1,
+                tv_uuid,
+                pairing_session_id,
+                pending_device_token_hash: pending_hash,
+                status: 'pending',
+                expires_at: new Date(Date.now() + 60_000)
+            });
+            return { rowCount: 1, rows: [] };
+        }
+        if (/SELECT[\s\S]*FROM nexus_tv\.pending_pairings[\s\S]*WHERE pairing_session_id = \$1/i.test(sql)) {
+            const [pairing_session_id, tv_uuid] = params;
+            const item = pendingPairings.get(pairing_session_id);
+            if (item && item.tv_uuid === tv_uuid) {
+                return { rows: [{ ...item }] };
+            }
+            return { rows: [] };
+        }
+        if (/UPDATE\s+nexus_tv\.pending_pairings\s+SET\s+status\s*=\s*'promoted'/i.test(sql)) {
+            const id = params[0];
+            for (const item of pendingPairings.values()) {
+                if (item.id === id) item.status = 'promoted';
+            }
+            return { rowCount: 1, rows: [] };
+        }
+        if (/UPDATE\s+nexus_tv\.pending_pairings\s+SET\s+status\s*=\s*'cancelled'/i.test(sql)) {
+            const [pairing_session_id, tv_uuid] = params;
+            const item = pendingPairings.get(pairing_session_id);
+            if (item && item.tv_uuid === tv_uuid) {
+                item.status = 'cancelled';
+            }
+            return { rowCount: 1, rows: [] };
+        }
+        if (/UPDATE\s+nexus_tv\.pending_pairings\s+SET\s+status\s*=\s*'expired'/i.test(sql)) {
+            const id = params[0];
+            for (const item of pendingPairings.values()) {
+                if (item.id === id) item.status = 'expired';
+            }
+            return { rowCount: 1, rows: [] };
+        }
+        if (/UPDATE\s+nexus_tv\.tv_screens\s+SET\s+is_active\s*=\s*true/i.test(sql)) {
             await wait(updateDelayMs);
             const row = profiles.get(params[1]);
             if (row) {
@@ -40,7 +83,7 @@ function makePool({ updateDelayMs = 0 } = {}) {
             }
             return { rowCount: row ? 1 : 0, rows: [] };
         }
-        if (/UPDATE nexus_tv\.tv_screens SET is_active=\$1/i.test(sql)) {
+        if (/UPDATE\s+nexus_tv\.tv_screens\s+SET\s+is_active\s*=\s*\$1/i.test(sql)) {
             const row = [...profiles.values()].find((item) => item.id === params[4]);
             if (row) {
                 [row.is_active, row.last_login, row.device_token_hash, row.token_created_at] = params.slice(0, 4);
@@ -92,6 +135,11 @@ async function createHarness({ ttlMs = 5_000, updateDelayMs = 0 } = {}) {
             });
             const entry = socketHub.pairingSessions.listPending().find((item) => item.sessionCode === pin && socketHub.pairingSessions.sessions.get(item.pairingSessionId)?.socketId === client.id);
             assert.ok(entry, 'Connected waiting client should have a server-issued session identity');
+            client.on('command:assign_profile', (profile, ack) => {
+                const ackPayload = { success: true, tv_uuid: profile?.tv_uuid, pairingSessionId: profile?.pairingSessionId };
+                if (typeof ack === 'function') ack(ackPayload);
+                client.emit('tv:pairing_confirmed', ackPayload);
+            });
             return { client, entry };
         },
         async post(path, body) {

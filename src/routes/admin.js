@@ -9,6 +9,7 @@ const { normalizeDaysOfWeek } = require('../utils/dateHelpers');
 const { requireRole } = require('../middlewares/auth');
 const { generateDeviceToken, hashDeviceToken } = require('../utils/deviceAuth');
 const { PairingSessionError } = require('../services/pairingSessionManager');
+const { generateSignedMediaUrl, SIGNED_URL_PURPOSE } = require('../utils/signedMediaUrl');
 
 let controlNamespace = null;
 let pairingSessions = null;
@@ -91,8 +92,12 @@ router.post('/bind-screen', requireRole('admin'), async (req, res) => {
 
     try {
         const result = await pairingSessions.bind(pairingSessionId, tv_uuid, async (_session, isBindingActive) => {
+            // ── Short Transaction 1: Validar perfil y registrar vinculación pendiente ──
             const client = await adminPool.connect();
-            let previousState;
+            let profile;
+            let deviceToken;
+            let deviceTokenHash;
+
             try {
                 await client.query('BEGIN');
                 const profileRes = await client.query(`
@@ -103,7 +108,6 @@ router.post('/bind-screen', requireRole('admin'), async (req, res) => {
                     LEFT JOIN nexus_tv.tv_playlist tp ON ts.id = tp.tv_id AND tp.is_primary = true
                     LEFT JOIN nexus_tv.playlists p ON tp.playlist_id = p.id
                     WHERE ts.tv_uuid = $1
-                    FOR UPDATE OF ts;
                 `, [tv_uuid]);
 
                 if (profileRes.rows.length === 0) {
@@ -111,7 +115,7 @@ router.post('/bind-screen', requireRole('admin'), async (req, res) => {
                 }
 
                 const row = profileRes.rows[0];
-                const profile = {
+                profile = {
                     id: row.id,
                     tv_uuid: row.tv_uuid,
                     name: row.name,
@@ -119,41 +123,152 @@ router.post('/bind-screen', requireRole('admin'), async (req, res) => {
                     playlist_id: row.playlist_id,
                     playlist_name: row.playlist_name
                 };
-                previousState = {
-                    id: row.id,
-                    is_active: row.is_active,
-                    last_login: row.last_login,
-                    device_token_hash: row.device_token_hash,
-                    token_created_at: row.token_created_at
-                };
 
-                const deviceToken = generateDeviceToken();
-                await client.query(
-                    'UPDATE nexus_tv.tv_screens SET is_active = true, last_login = NOW(), device_token_hash = $1, token_created_at = NOW() WHERE tv_uuid = $2',
-                    [hashDeviceToken(deviceToken), tv_uuid]
-                );
+                deviceToken = generateDeviceToken();
+                deviceTokenHash = hashDeviceToken(deviceToken);
+
+                // Registrar vinculación pendiente (expira en 60 segundos por seguridad)
+                _session.pendingTokenHash = deviceTokenHash;
+                _session.pendingExpiresAt = Date.now() + 60_000;
+
+                try {
+                    await client.query(`
+                        INSERT INTO nexus_tv.pending_pairings (tv_uuid, pairing_session_id, pending_device_token_hash, expires_at, status)
+                        VALUES ($1, $2, $3, NOW() + INTERVAL '60 seconds', 'pending')
+                        ON CONFLICT (pairing_session_id) DO UPDATE
+                        SET tv_uuid = EXCLUDED.tv_uuid,
+                            pending_device_token_hash = EXCLUDED.pending_device_token_hash,
+                            expires_at = EXCLUDED.expires_at,
+                            status = 'pending',
+                            updated_at = NOW();
+                    `, [tv_uuid, pairingSessionId, deviceTokenHash]);
+                } catch (pendingErr) {
+                    if (pendingErr.code === '42P01') {
+                        throw new PairingSessionError(
+                            'PAIRING_SCHEMA_NOT_MIGRATED',
+                            'La base de datos requiere la migración 07_pending_pairings para emparejar pantallas.',
+                            503
+                        );
+                    }
+                    throw pendingErr;
+                }
 
                 if (!isBindingActive()) {
                     throw new PairingSessionError('PAIRING_SESSION_DISCONNECTED', 'La pantalla se desconectó durante la vinculación.', 410);
                 }
-                await client.query('COMMIT');
 
-                return {
-                    profile,
-                    deviceToken,
-                    rollback: async () => {
-                        await adminPool.query(
-                            'UPDATE nexus_tv.tv_screens SET is_active=$1, last_login=$2, device_token_hash=$3, token_created_at=$4 WHERE id=$5',
-                            [previousState.is_active, previousState.last_login, previousState.device_token_hash, previousState.token_created_at, previousState.id]
-                        );
-                    }
-                };
+                // Confirmar Transacción 1 de inmediato ANTES de iniciar la entrega por Socket.IO
+                await client.query('COMMIT');
             } catch (error) {
                 try { await client.query('ROLLBACK'); } catch (_rollbackError) {}
                 throw error;
             } finally {
                 client.release();
             }
+
+            // Objeto de enlace con handlers para la segunda transacción corta (promoción) y cancelación
+            const bindingHandlers = {
+                profile,
+                deviceToken,
+                // ── Short Transaction 2: Promover credencial pendiente a activa tras ACK ──
+                promote: async () => {
+                    const promoteClient = await adminPool.connect();
+                    try {
+                        await promoteClient.query('BEGIN');
+
+                        let pendingTokenHashToPromote = null;
+                        let pendingRowId = null;
+
+                        let pendingRes;
+                        try {
+                            pendingRes = await promoteClient.query(`
+                                SELECT id, tv_uuid, pending_device_token_hash, status, expires_at
+                                FROM nexus_tv.pending_pairings
+                                WHERE pairing_session_id = $1 AND tv_uuid = $2
+                                FOR UPDATE
+                            `, [pairingSessionId, tv_uuid]);
+                        } catch (readErr) {
+                            if (readErr.code === '42P01') {
+                                throw new PairingSessionError(
+                                    'PAIRING_SCHEMA_NOT_MIGRATED',
+                                    'La base de datos requiere la migración 07_pending_pairings para completar la vinculación.',
+                                    503
+                                );
+                            }
+                            throw readErr;
+                        }
+
+                        if (!pendingRes || pendingRes.rows.length === 0) {
+                            throw new PairingSessionError('PAIRING_PENDING_NOT_FOUND', 'Registro de vinculación pendiente no encontrado en base de datos.', 404);
+                        }
+
+                        const pendingRow = pendingRes.rows[0];
+                        if (pendingRow.status === 'promoted') {
+                            // Operación repetida idempotente
+                            await promoteClient.query('COMMIT');
+                            return;
+                        }
+
+                        if (pendingRow.status !== 'pending') {
+                            throw new PairingSessionError('PAIRING_SESSION_INVALID_STATE', `La vinculación pendiente ya no está activa (${pendingRow.status}).`, 409);
+                        }
+
+                        if (new Date(pendingRow.expires_at) <= new Date()) {
+                            await promoteClient.query(`
+                                UPDATE nexus_tv.pending_pairings
+                                SET status = 'expired', updated_at = NOW()
+                                WHERE id = $1
+                            `, [pendingRow.id]);
+                            await promoteClient.query('COMMIT');
+                            throw new PairingSessionError('PAIRING_SESSION_EXPIRED', 'La vinculación pendiente expiró.', 410);
+                        }
+
+                        pendingTokenHashToPromote = pendingRow.pending_device_token_hash;
+                        pendingRowId = pendingRow.id;
+
+                        // Promover a activa en tv_screens
+                        await promoteClient.query(`
+                            UPDATE nexus_tv.tv_screens
+                            SET is_active = true, last_login = NOW(), device_token_hash = $1, token_created_at = NOW()
+                            WHERE tv_uuid = $2
+                        `, [pendingTokenHashToPromote, tv_uuid]);
+
+                        // Marcar registro como promovido si existe tabla
+                        if (pendingRowId) {
+                            await promoteClient.query(`
+                                UPDATE nexus_tv.pending_pairings
+                                SET status = 'promoted', updated_at = NOW()
+                                WHERE id = $1
+                            `, [pendingRowId]);
+                        }
+
+                        await promoteClient.query('COMMIT');
+                    } catch (promoteError) {
+                        try { await promoteClient.query('ROLLBACK'); } catch (_) {}
+                        throw promoteError;
+                    } finally {
+                        promoteClient.release();
+                    }
+                },
+                // ── Cancelación corta si falla ACK o el cliente rechaza ──
+                cancel: async () => {
+                    _session.pendingTokenHash = null;
+                    try {
+                        await adminPool.query(`
+                            UPDATE nexus_tv.pending_pairings
+                            SET status = 'cancelled', updated_at = NOW()
+                            WHERE pairing_session_id = $1 AND tv_uuid = $2 AND status = 'pending'
+                        `, [pairingSessionId, tv_uuid]);
+                    } catch (cancelErr) {
+                        if (cancelErr.code !== '42P01') throw cancelErr;
+                    }
+                },
+                // Compatibilidad con contratos anteriores
+                commit: async () => bindingHandlers.promote(),
+                rollback: async () => bindingHandlers.cancel()
+            };
+
+            return bindingHandlers;
         });
         return res.json(result);
     } catch (err) {
@@ -162,7 +277,8 @@ router.post('/bind-screen', requireRole('admin'), async (req, res) => {
         return res.status(status).json({
             success: false,
             code: err.code || 'PAIRING_BIND_FAILED',
-            message: status >= 500 ? 'Error interno al vincular la pantalla.' : err.message
+            rollbackFailed: err.rollbackFailed === true,
+            message: status === 500 ? 'Error interno al vincular la pantalla.' : err.message
         });
     }
 });
@@ -666,6 +782,64 @@ router.post('/temporary-content', requireRole('admin'), async (req, res) => {
         return res.status(503).json({ success: false, message: 'Servicio de broadcast temporal no disponible.' });
     }
 
+    let finalSourceUrl = content.source_url;
+    let signedUrlInfo = null;
+
+    // Si es un archivo local y el target es una TV específica, generar URL firmada
+    if (target !== 'all' && content.source_url.startsWith('/media/')) {
+        try {
+            // Verificar que el contenido existe en BD y es local
+            const filename = content.source_url.replace(/^\/media\//, '');
+            const contentRes = await pool.query(
+                'SELECT id, duration_seconds FROM nexus_tv.content WHERE source_url = $1 AND source_type = \'local_file\'',
+                [content.source_url]
+            );
+            if (contentRes.rows.length > 0) {
+                const dbContent = contentRes.rows[0];
+                const contentDuration = dbContent.duration_seconds || content.duration_seconds || 3600;
+                const ttlSeconds = Math.max(3600, Math.min(contentDuration + 1800, 14400));
+
+                finalSourceUrl = generateSignedMediaUrl({
+                    filename,
+                    purpose: SIGNED_URL_PURPOSE.TV_PLAYBACK,
+                    tvUuid: target,
+                    ttlSeconds,
+                    contentId: dbContent.id
+                });
+                signedUrlInfo = { expires_in: ttlSeconds };
+            }
+        } catch (signErr) {
+            console.warn('⚠️ No se pudo generar URL firmada para contenido temporal, usando URL directa:', signErr.message);
+        }
+    }
+    // Si target es 'all' y es archivo local, generar URL de preview administrativo (sin TV binding)
+    else if (target === 'all' && content.source_url.startsWith('/media/')) {
+        try {
+            const filename = content.source_url.replace(/^\/media\//, '');
+            const contentRes = await pool.query(
+                'SELECT id FROM nexus_tv.content WHERE source_url = $1 AND source_type = \'local_file\'',
+                [content.source_url]
+            );
+            if (contentRes.rows.length > 0) {
+                const dbContent = contentRes.rows[0];
+                // TTL más largo para broadcast global (ej. 4 horas)
+                finalSourceUrl = generateSignedMediaUrl({
+                    filename,
+                    purpose: SIGNED_URL_PURPOSE.ADMIN_PREVIEW,
+                    ttlSeconds: 14400,
+                    contentId: dbContent.id
+                });
+                signedUrlInfo = { expires_in: 14400 };
+            }
+        } catch (signErr) {
+            console.warn('⚠️ No se pudo generar URL firmada para broadcast global:', signErr.message);
+        }
+    }
+
+    if (!setTemporaryContentFn) {
+        return res.status(503).json({ success: false, message: 'Servicio de broadcast temporal no disponible.' });
+    }
+
     if (target !== 'all') {
         try {
             const screenCheck = await pool.query('SELECT id, is_active FROM nexus_tv.tv_screens WHERE tv_uuid::text = $1', [target]);
@@ -680,7 +854,7 @@ router.post('/temporary-content', requireRole('admin'), async (req, res) => {
     const payload = {
         title: content.title || 'Transmisión Temporal en Vivo',
         content_type: content.content_type || 'video',
-        source_url: content.source_url,
+        source_url: finalSourceUrl,
         duration_seconds: content.duration_seconds || 0,
         loop: content.loop !== false,
         muted: content.muted === true,
@@ -692,7 +866,8 @@ router.post('/temporary-content', requireRole('admin'), async (req, res) => {
     res.json({
         success: true,
         message: `Contenido temporal emitido a ${target === 'all' ? 'todas las pantallas' : `pantalla [${target}]`}.`,
-        content: payload
+        content: payload,
+        signed_url: signedUrlInfo ? { expires_in: signedUrlInfo.expires_in } : null
     });
 });
 
@@ -769,6 +944,59 @@ router.get('/content', requireRole('admin', 'editor', 'viewer'), async (req, res
     }
 });
 
+// Endpoint para obtener URL firmada de preview administrativo
+// Requiere autenticación admin/editor/viewer y RBAC sobre el recurso.
+router.get('/media/preview-url/:contentId', requireRole('admin', 'editor', 'viewer'), async (req, res) => {
+    const { contentId } = req.params;
+
+    if (!contentId) {
+        return res.status(400).json({ success: false, message: 'contentId es requerido.' });
+    }
+
+    try {
+        // Verificar que el contenido existe y es un archivo local
+        const contentRes = await pool.query(
+            'SELECT id, source_url, source_type, content_type, duration_seconds FROM nexus_tv.content WHERE id = $1',
+            [contentId]
+        );
+        const content = contentRes.rows[0];
+        if (!content) {
+            return res.status(404).json({ success: false, message: 'Contenido no encontrado.' });
+        }
+        if (content.source_type !== 'local_file') {
+            return res.status(400).json({ success: false, message: 'Solo se pueden generar previews de archivos locales.' });
+        }
+
+        // Extraer solo el nombre del archivo
+        const filename = content.source_url.replace(/^\/media\//, '');
+        if (!filename || filename === content.source_url) {
+            return res.status(400).json({ success: false, message: 'Ruta de archivo local inválida.' });
+        }
+
+        // TTL para preview administrativo: 30 minutos (suficiente para visualizar)
+        const ttlSeconds = 1800;
+
+        // Generar URL firmada con propósito ADMIN_PREVIEW
+        const signedUrl = generateSignedMediaUrl({
+            filename,
+            purpose: SIGNED_URL_PURPOSE.ADMIN_PREVIEW,
+            ttlSeconds,
+            contentId: content.id
+        });
+
+        res.json({
+            success: true,
+            signed_url: signedUrl,
+            expires_in: ttlSeconds,
+            content_type: content.content_type,
+            duration_seconds: content.duration_seconds
+        });
+    } catch (err) {
+        console.error('❌ Error generando URL firmada de preview:', err.message);
+        res.status(500).json({ success: false, message: 'Error interno al generar URL de preview.' });
+    }
+});
+
 // Estadísticas para el panel de control
 router.get('/stats', requireRole('admin', 'editor', 'viewer'), async (req, res) => {
     try {
@@ -792,8 +1020,26 @@ router.get('/stats', requireRole('admin', 'editor', 'viewer'), async (req, res) 
     }
 });
 
+async function reconcilePendingPairings(poolToUse = adminPool) {
+    if (!poolToUse) return 0;
+    try {
+        const res = await poolToUse.query(`
+            UPDATE nexus_tv.pending_pairings
+            SET status = 'expired', updated_at = NOW()
+            WHERE status = 'pending' AND expires_at <= NOW()
+        `);
+        return res.rowCount || 0;
+    } catch (err) {
+        if (err.code !== '42P01') {
+            console.warn('⚠️ [Reconciliation] Error limpiando vinculaciones pendientes:', err.message);
+        }
+        return 0;
+    }
+}
+
 module.exports = {
     router,
     setNamespaces,
-    normalizeDaysOfWeek
+    normalizeDaysOfWeek,
+    reconcilePendingPairings
 };

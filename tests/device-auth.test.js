@@ -5,6 +5,9 @@
 
 process.env.NODE_ENV = 'test';
 process.env.JWT_SECRET ||= require('node:crypto').randomBytes(32).toString('hex');
+// Determinismo AUD-006: el hub global del archivo debe construirse con el valor
+// predeterminado seguro, independientemente del entorno donde se ejecute la suite.
+process.env.ALLOW_QUERY_DEVICE_TOKEN = 'false';
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -539,5 +542,453 @@ test('20. HTTP POST /api/tv/login: Admite peticiones con credencial de dispositi
         assert.equal(resData.screen.tv_uuid, TV_A_UUID);
     } finally {
         origDb.pool.query = origPoolQuery;
+    }
+});
+
+// ─────────────────────────────────────────────────────────────
+// 21. Handshake vía cabecera HTTP x-device-token: aceptada
+// ─────────────────────────────────────────────────────────────
+test('21. Handshake vía cabecera HTTP x-device-token: aceptada', async () => {
+    const { client, error } = await connectClient({
+        auth: { tv_uuid: TV_A_UUID },
+        extraHeaders: { 'x-device-token': TOKEN_A }
+    });
+    assert.equal(error, null, 'Credencial por cabecera x-device-token debe ser aceptada');
+    assert.equal(socketHub.onlineScreens.has(TV_A_UUID), true);
+    await closeClient(client);
+});
+
+// ─────────────────────────────────────────────────────────────
+// 22. AUD-006: Credencial proporcionada exclusivamente en query string: rechazada por defecto
+// ─────────────────────────────────────────────────────────────
+test('22. AUD-006: Credencial en query string: rechazada por defecto (ALLOW_QUERY_DEVICE_TOKEN=false)', async () => {
+    const { client, error } = await connectClient({
+        query: { tv_uuid: TV_A_UUID, device_token: TOKEN_A }
+    });
+    assert.ok(error, 'Debe rechazar token de dispositivo en query string por defecto');
+    assert.match(error.message, /device_token in query string is rejected/i);
+    assert.equal(socketHub.onlineScreens.has(TV_A_UUID), false);
+    await closeClient(client);
+});
+
+// ─────────────────────────────────────────────────────────────
+// 23. AUD-006: Fallback de compatibilidad explícito (allowQueryDeviceToken = true): admitido con warning seguro
+// ─────────────────────────────────────────────────────────────
+test('23. AUD-006: Fallback de compatibilidad (allowQueryDeviceToken = true): admitido con advertencia sin fugar token', async () => {
+    const tempServer = http.createServer();
+    const tempIo = new Server(tempServer, { cors: { origin: '*' } });
+    const tempHub = initSockets(tempIo, { pool: createMockPool(), allowQueryDeviceToken: true });
+
+    await new Promise((resolve) => tempServer.listen(0, '127.0.0.1', resolve));
+    const tempPort = tempServer.address().port;
+
+    const warnings = [];
+    const origWarn = console.warn;
+    console.warn = (...args) => {
+        warnings.push(args.join(' '));
+    };
+
+    try {
+        const client = ioc(`http://127.0.0.1:${tempPort}/control`, {
+            transports: ['websocket'],
+            reconnection: false,
+            query: { tv_uuid: TV_A_UUID, device_token: TOKEN_A }
+        });
+
+        const connectResult = await new Promise((resolve) => {
+            client.once('connect', () => resolve({ error: null }));
+            client.once('connect_error', (err) => resolve({ error: err }));
+        });
+
+        assert.equal(connectResult.error, null, 'Debe permitir conexión por query string cuando la bandera está activa');
+        assert.equal(tempHub.onlineScreens.has(TV_A_UUID), true);
+
+        // Verificar advertencia de deprecación
+        const deprecationWarn = warnings.find((w) => w.includes('Deprecation Warning AUD-006'));
+        assert.ok(deprecationWarn, 'Debe emitir advertencia de obsolescencia');
+        assert.match(deprecationWarn, new RegExp(TV_A_UUID));
+        assert.equal(deprecationWarn.includes(TOKEN_A), false, 'La advertencia NUNCA debe contener el token en texto plano');
+
+        client.disconnect();
+    } finally {
+        console.warn = origWarn;
+        tempHub.pairingSessions.close();
+        await new Promise((resolve) => tempIo.close(resolve));
+        await new Promise((resolve) => tempServer.close(resolve));
+    }
+});
+
+// ─────────────────────────────────────────────────────────────
+// 24. AUD-006: Con fallback activo, tokens inválidos o cruzados en query string siguen siendo rechazados
+// ─────────────────────────────────────────────────────────────
+test('24. AUD-006: Con fallback activo, tokens inválidos o cruzados en query string siguen rechazados', async () => {
+    const tempServer = http.createServer();
+    const tempIo = new Server(tempServer, { cors: { origin: '*' } });
+    const tempHub = initSockets(tempIo, { pool: createMockPool(), allowQueryDeviceToken: true });
+
+    await new Promise((resolve) => tempServer.listen(0, '127.0.0.1', resolve));
+    const tempPort = tempServer.address().port;
+
+    try {
+        // A. Token cruzado (Token de TV A con UUID de TV B)
+        const crossClient = ioc(`http://127.0.0.1:${tempPort}/control`, {
+            transports: ['websocket'],
+            reconnection: false,
+            query: { tv_uuid: TV_B_UUID, device_token: TOKEN_A }
+        });
+        const crossResult = await new Promise((resolve) => {
+            crossClient.once('connect', () => resolve({ error: null }));
+            crossClient.once('connect_error', (err) => resolve({ error: err }));
+        });
+        assert.ok(crossResult.error, 'Token cruzado en query string debe ser rechazado');
+        assert.match(crossResult.error.message, /invalid device credentials/i);
+        crossClient.disconnect();
+
+        // B. Token malformado
+        const malformedClient = ioc(`http://127.0.0.1:${tempPort}/control`, {
+            transports: ['websocket'],
+            reconnection: false,
+            query: { tv_uuid: TV_A_UUID, device_token: 'not-a-valid-token' }
+        });
+        const malformedResult = await new Promise((resolve) => {
+            malformedClient.once('connect', () => resolve({ error: null }));
+            malformedClient.once('connect_error', (err) => resolve({ error: err }));
+        });
+        assert.ok(malformedResult.error, 'Token malformado en query string debe ser rechazado');
+        assert.match(malformedResult.error.message, /malformed device_token/i);
+        malformedClient.disconnect();
+    } finally {
+        tempHub.pairingSessions.close();
+        await new Promise((resolve) => tempIo.close(resolve));
+        await new Promise((resolve) => tempServer.close(resolve));
+    }
+});
+
+// ─────────────────────────────────────────────────────────────
+// 25. AUD-006: Verificación de que el servidor no incluye tokens en mensajes de error ni métricas
+// ─────────────────────────────────────────────────────────────
+test('25. AUD-006: Verificación de que los errores no exponen el valor del token', async () => {
+    const errors = [];
+    const testCases = [
+        { auth: { tv_uuid: TV_A_UUID, device_token: 'invalid-token-1234' } },
+        { auth: { tv_uuid: TV_B_UUID, device_token: TOKEN_A } },
+        { query: { tv_uuid: TV_A_UUID, device_token: TOKEN_A } }
+    ];
+
+    for (const opts of testCases) {
+        const { client, error } = await connectClient(opts);
+        if (error) {
+            errors.push(error.message);
+            assert.equal(error.message.includes(TOKEN_A), false, 'El mensaje de error no debe contener TOKEN_A');
+            assert.equal(error.message.includes('invalid-token-1234'), false, 'El mensaje de error no debe contener el token malformado');
+        }
+        await closeClient(client);
+    }
+    assert.equal(errors.length, 3, 'Todos los intentos no autorizados deben generar errores sin fugar secretos');
+});
+
+// ─────────────────────────────────────────────────────────────
+// 26. AUD-006: La telemetría de retiro detecta el token en query aunque el cliente también use auth
+// ─────────────────────────────────────────────────────────────
+test('26. AUD-006: La telemetría de retiro detecta el token en query aunque el cliente también envíe auth', async () => {
+    const tempServer = http.createServer();
+    const tempIo = new Server(tempServer, { cors: { origin: '*' } });
+    const tempHub = initSockets(tempIo, { pool: createMockPool(), allowQueryDeviceToken: true });
+
+    await new Promise((resolve) => tempServer.listen(0, '127.0.0.1', resolve));
+    const tempPort = tempServer.address().port;
+
+    const warnings = [];
+    const origWarn = console.warn;
+    console.warn = (...args) => {
+        warnings.push(args.join(' '));
+    };
+
+    try {
+        const client = ioc(`http://127.0.0.1:${tempPort}/control`, {
+            transports: ['websocket'],
+            reconnection: false,
+            auth: { tv_uuid: TV_A_UUID, device_token: TOKEN_A },
+            query: { tv_uuid: TV_A_UUID, device_token: TOKEN_A }
+        });
+
+        const connectResult = await new Promise((resolve) => {
+            client.once('connect', () => resolve({ error: null }));
+            client.once('connect_error', (err) => resolve({ error: err }));
+        });
+
+        assert.equal(connectResult.error, null, 'La credencial auth válida debe ser aceptada');
+        const deprecationWarn = warnings.find((w) => w.includes('Deprecation Warning AUD-006'));
+        assert.ok(deprecationWarn, 'Debe advertir sobre el uso de query string incluso cuando auth también viaja');
+        assert.equal(deprecationWarn.includes(TOKEN_A), false, 'La advertencia NUNCA debe contener el token');
+
+        client.disconnect();
+    } finally {
+        console.warn = origWarn;
+        tempHub.pairingSessions.close();
+        await new Promise((resolve) => tempIo.close(resolve));
+        await new Promise((resolve) => tempServer.close(resolve));
+    }
+});
+
+// ─────────────────────────────────────────────────────────────
+// 27. AUD-006: La configuración explícita prevalece sobre el entorno
+// ─────────────────────────────────────────────────────────────
+test('27. AUD-006: allowQueryDeviceToken=false explícito prevalece aunque el entorno esté en true', async () => {
+    const prevEnv = process.env.ALLOW_QUERY_DEVICE_TOKEN;
+    process.env.ALLOW_QUERY_DEVICE_TOKEN = 'true';
+
+    const tempServer = http.createServer();
+    const tempIo = new Server(tempServer, { cors: { origin: '*' } });
+    const tempHub = initSockets(tempIo, { pool: createMockPool(), allowQueryDeviceToken: false });
+
+    await new Promise((resolve) => tempServer.listen(0, '127.0.0.1', resolve));
+    const tempPort = tempServer.address().port;
+
+    try {
+        const client = ioc(`http://127.0.0.1:${tempPort}/control`, {
+            transports: ['websocket'],
+            reconnection: false,
+            query: { tv_uuid: TV_A_UUID, device_token: TOKEN_A }
+        });
+
+        const connectResult = await new Promise((resolve) => {
+            client.once('connect', () => resolve({ error: null }));
+            client.once('connect_error', (err) => resolve({ error: err }));
+        });
+
+        assert.ok(connectResult.error, 'La opción explícita false debe rechazar el token en query');
+        assert.match(connectResult.error.message, /device_token in query string is rejected/i);
+        client.disconnect();
+    } finally {
+        if (prevEnv === undefined) delete process.env.ALLOW_QUERY_DEVICE_TOKEN;
+        else process.env.ALLOW_QUERY_DEVICE_TOKEN = prevEnv;
+        tempHub.pairingSessions.close();
+        await new Promise((resolve) => tempIo.close(resolve));
+        await new Promise((resolve) => tempServer.close(resolve));
+    }
+});
+
+// ─────────────────────────────────────────────────────────────
+// 28. AUD-006: Observación sin aceptación — detecta query token rechazado (fallback=false)
+// ─────────────────────────────────────────────────────────────
+test('28. AUD-006: observeQueryDeviceToken detecta intentos rechazados manteniendo el fallback deshabilitado', async () => {
+    const tempServer = http.createServer();
+    const tempIo = new Server(tempServer, { cors: { origin: '*' } });
+    // Observación ACTIVADA, fallback SIGUE deshabilitado: no acepta la query.
+    const tempHub = initSockets(tempIo, { pool: createMockPool(), observeQueryDeviceToken: true });
+
+    await new Promise((resolve) => tempServer.listen(0, '127.0.0.1', resolve));
+    const tempPort = tempServer.address().port;
+
+    const warnings = [];
+    const origWarn = console.warn;
+    console.warn = (...args) => { warnings.push(args.join(' ')); };
+
+    try {
+        const client = ioc(`http://127.0.0.1:${tempPort}/control`, {
+            transports: ['websocket'],
+            reconnection: false,
+            query: { tv_uuid: TV_A_UUID, device_token: TOKEN_A }
+        });
+
+        const connectResult = await new Promise((resolve) => {
+            client.once('connect', () => resolve({ error: null }));
+            client.once('connect_error', (err) => resolve({ error: err }));
+        });
+
+        assert.ok(connectResult.error, 'El token en query debe seguir siendo rechazado');
+        assert.match(connectResult.error.message, /device_token in query string is rejected/i);
+
+        const obsWarn = warnings.find((w) => w.includes('Observación AUD-006'));
+        assert.ok(obsWarn, 'Debe registrar observación del intento rechazado');
+        assert.equal(obsWarn.includes(TOKEN_A), false, 'La observación no debe contener el token');
+        assert.equal(tempHub.onlineScreens.has(TV_A_UUID), false, 'La pantalla no debe quedar registrada');
+
+        client.disconnect();
+    } finally {
+        console.warn = origWarn;
+        tempHub.pairingSessions.close();
+        await new Promise((resolve) => tempIo.close(resolve));
+        await new Promise((resolve) => tempServer.close(resolve));
+    }
+});
+
+// ─────────────────────────────────────────────────────────────
+// 29. AUD-006: Observación no activa el fallback por sí misma
+// ─────────────────────────────────────────────────────────────
+test('29. AUD-006: observeQueryDeviceToken=true NO habilita el fallback de query string', async () => {
+    const prevEnv = process.env.ALLOW_QUERY_DEVICE_TOKEN;
+    process.env.ALLOW_QUERY_DEVICE_TOKEN = 'false';
+
+    const tempServer = http.createServer();
+    const tempIo = new Server(tempServer, { cors: { origin: '*' } });
+    // Sólo observación, sin allowQueryDeviceToken
+    const tempHub = initSockets(tempIo, { pool: createMockPool(), observeQueryDeviceToken: true });
+
+    await new Promise((resolve) => tempServer.listen(0, '127.0.0.1', resolve));
+    const tempPort = tempServer.address().port;
+
+    const warnings = [];
+    const origWarn = console.warn;
+    console.warn = (...args) => { warnings.push(args.join(' ')); };
+
+    try {
+        const client = ioc(`http://127.0.0.1:${tempPort}/control`, {
+            transports: ['websocket'],
+            reconnection: false,
+            query: { tv_uuid: TV_A_UUID, device_token: TOKEN_A }
+        });
+
+        const connectResult = await new Promise((resolve) => {
+            client.once('connect', () => resolve({ error: null }));
+            client.once('connect_error', (err) => resolve({ error: err }));
+        });
+
+        assert.ok(connectResult.error, 'La observación no debe aceptar credencial por query');
+        assert.match(connectResult.error.message, /device_token in query string is rejected/i);
+        assert.equal(tempHub.onlineScreens.has(TV_A_UUID), false);
+
+        const deprecationWarn = warnings.find((w) => w.includes('Observación AUD-006'));
+        assert.ok(deprecationWarn, 'Debe observar aunque no acepte');
+        client.disconnect();
+    } finally {
+        if (prevEnv === undefined) delete process.env.ALLOW_QUERY_DEVICE_TOKEN;
+        else process.env.ALLOW_QUERY_DEVICE_TOKEN = prevEnv;
+        console.warn = origWarn;
+        tempHub.pairingSessions.close();
+        await new Promise((resolve) => tempIo.close(resolve));
+        await new Promise((resolve) => tempServer.close(resolve));
+    }
+});
+
+// ─────────────────────────────────────────────────────────────
+// 30. AUD-006: Observación no registra tokens ni URIs completas
+// ─────────────────────────────────────────────────────────────
+test('30. AUD-006: las advertencias de observación no contienen tokens ni URLs', async () => {
+    const tempServer = http.createServer();
+    const tempIo = new Server(tempServer, { cors: { origin: '*' } });
+    const tempHub = initSockets(tempIo, { pool: createMockPool(), observeQueryDeviceToken: true });
+
+    await new Promise((resolve) => tempServer.listen(0, '127.0.0.1', resolve));
+    const tempPort = tempServer.address().port;
+
+    const warnings = [];
+    const origWarn = console.warn;
+    console.warn = (...args) => { warnings.push(args.join(' ')); };
+
+    try {
+        const client = ioc(`http://127.0.0.1:${tempPort}/control`, {
+            transports: ['websocket'],
+            reconnection: false,
+            query: { tv_uuid: TV_A_UUID, device_token: TOKEN_A }
+        });
+
+        await new Promise((resolve) => {
+            client.once('connect', () => resolve());
+            client.once('connect_error', () => resolve());
+        });
+
+        for (const w of warnings) {
+            assert.equal(w.includes(TOKEN_A), false, 'Ninguna advertencia debe contener TOKEN_A');
+            assert.equal(/http:\/\/127\.0\.0\.1/.test(w), false, 'Ninguna advertencia debe contener la URL del host');
+        }
+        client.disconnect();
+    } finally {
+        console.warn = origWarn;
+        tempHub.pairingSessions.close();
+        await new Promise((resolve) => tempIo.close(resolve));
+        await new Promise((resolve) => tempServer.close(resolve));
+    }
+});
+
+// ─────────────────────────────────────────────────────────────
+// 31. AUD-006: Observación requiere tv_uuid válido — no se acepta UUID arbitrario
+// ─────────────────────────────────────────────────────────────
+test('31. AUD-006: la observación no registra ni considera auténtico un tv_uuid no validado', async () => {
+    const tempServer = http.createServer();
+    const tempIo = new Server(tempServer, { cors: { origin: '*' } });
+    const tempHub = initSockets(tempIo, { pool: createMockPool(), observeQueryDeviceToken: true });
+
+    await new Promise((resolve) => tempServer.listen(0, '127.0.0.1', resolve));
+    const tempPort = tempServer.address().port;
+
+    const warnings = [];
+    const origWarn = console.warn;
+    console.warn = (...args) => { warnings.push(args.join(' ')); };
+
+    try {
+        const client = ioc(`http://127.0.0.1:${tempPort}/control`, {
+            transports: ['websocket'],
+            reconnection: false,
+            query: { tv_uuid: 'not-a-uuid', device_token: 'bad' }
+        });
+
+        const connectResult = await new Promise((resolve) => {
+            client.once('connect', () => resolve({ error: null }));
+            client.once('connect_error', (err) => resolve({ error: err }));
+        });
+
+        assert.ok(connectResult.error, 'Debe rechazar tv_uuid malformado');
+        assert.equal(warnings.some((w) => w.includes('Observación AUD-006')), false,
+            'No debe observar cuando el tv_uuid no supera el filtro de formato');
+        client.disconnect();
+    } finally {
+        console.warn = origWarn;
+        tempHub.pairingSessions.close();
+        await new Promise((resolve) => tempIo.close(resolve));
+        await new Promise((resolve) => tempServer.close(resolve));
+    }
+});
+
+// ─────────────────────────────────────────────────────────────
+// 32. AUD-006: Integración env-driven — OBSERVE_QUERY_DEVICE_TOKEN registra sin aceptar
+// ─────────────────────────────────────────────────────────────
+test('32. AUD-006: la observación via entorno registra intentos rechazados (env-driven)', async () => {
+    const prevAllow = process.env.ALLOW_QUERY_DEVICE_TOKEN;
+    const prevObserve = process.env.OBSERVE_QUERY_DEVICE_TOKEN;
+    process.env.ALLOW_QUERY_DEVICE_TOKEN = 'false';
+    process.env.OBSERVE_QUERY_DEVICE_TOKEN = 'true';
+
+    const tempServer = http.createServer();
+    const tempIo = new Server(tempServer, { cors: { origin: '*' } });
+    // initSockets lee ALLOW_QUERY_DEVICE_TOKEN directamente, igual que lo hace nx_tv.js
+    const tempHub = initSockets(tempIo, { pool: createMockPool(), observeQueryDeviceToken: true });
+
+    await new Promise((resolve) => tempServer.listen(0, '127.0.0.1', resolve));
+    const tempPort = tempServer.address().port;
+
+    const warnings = [];
+    const origWarn = console.warn;
+    console.warn = (...args) => { warnings.push(args.join(' ')); };
+
+    try {
+        const client = ioc(`http://127.0.0.1:${tempPort}/control`, {
+            transports: ['websocket'],
+            reconnection: false,
+            query: { tv_uuid: TV_A_UUID, device_token: TOKEN_A }
+        });
+
+        const connectResult = await new Promise((resolve) => {
+            client.once('connect', () => resolve({ error: null }));
+            client.once('connect_error', (err) => resolve({ error: err }));
+        });
+
+        assert.ok(connectResult.error, 'Debe rechazar el token en query con fallback=false');
+        assert.match(connectResult.error.message, /device_token in query string is rejected/i);
+
+        const obsWarn = warnings.find((w) => w.includes('Observación AUD-006'));
+        assert.ok(obsWarn, 'Debe registrar la observación env-driven');
+        assert.equal(obsWarn.includes(TOKEN_A), false);
+        client.disconnect();
+    } finally {
+        if (prevAllow === undefined) delete process.env.ALLOW_QUERY_DEVICE_TOKEN;
+        else process.env.ALLOW_QUERY_DEVICE_TOKEN = prevAllow;
+        if (prevObserve === undefined) delete process.env.OBSERVE_QUERY_DEVICE_TOKEN;
+        else process.env.OBSERVE_QUERY_DEVICE_TOKEN = prevObserve;
+        console.warn = origWarn;
+        tempHub.pairingSessions.close();
+        await new Promise((resolve) => tempIo.close(resolve));
+        await new Promise((resolve) => tempServer.close(resolve));
     }
 });

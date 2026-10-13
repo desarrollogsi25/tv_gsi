@@ -24,6 +24,9 @@ const authRoutes = require('./src/routes/auth');
 const authMiddleware = require('./src/middlewares/auth');
 const { createApiCorsOptions } = require('./src/config/cors');
 
+// Media signed URLs
+const { signedMediaUrlMiddleware } = require('./src/utils/signedMediaUrl');
+
 // Services
 const { initCronJobs } = require('./src/services/cron');
 
@@ -50,7 +53,10 @@ const io = new Server(server, {
 });
 
 // Inicializar hub de control con auto-descubrimiento y contenido temporal
-const { controlNs, pairingSessions, setTemporaryContent, clearTemporaryContent, getTemporaryState } = initSockets(io);
+const { controlNs, pairingSessions, setTemporaryContent, clearTemporaryContent, getTemporaryState } = initSockets(io, {
+    allowQueryDeviceToken: process.env.ALLOW_QUERY_DEVICE_TOKEN === 'true',
+    observeQueryDeviceToken: process.env.OBSERVE_QUERY_DEVICE_TOKEN === 'true'
+});
 
 // Inyectar namespaces y vinculador en las rutas admin
 setNamespaces({ controlNs, pairingSessions, setTemporaryContent, clearTemporaryContent, getTemporaryState });
@@ -67,9 +73,13 @@ if (!fs.existsSync(mediaDirectory)) {
     fs.mkdirSync(mediaDirectory, { recursive: true });
 }
 
-// ═══════════════════════════════════════
-// Servir archivos de media con fallback
-// ═══════════════════════════════════════
+// ════════════════════════════════════════
+// Servir archivos de media con validación de firma (AUD-007 / MISIÓN 5)
+// Todas las peticiones a /media/* deben presentar una URL firmada válida.
+// El middleware verifica HMAC, expiración y propósito antes de servir el archivo.
+// ════════════════════════════════════════
+app.use('/media', signedMediaUrlMiddleware);
+
 const mediaStatic = express.static(mediaDirectory, {
     etag: false,
     lastModified: false,
@@ -85,10 +95,17 @@ app.use('/media', (req, res, next) => {
     const decodedFile = decodeURIComponent(requestedFile);
     const filePath = path.join(mediaDirectory, decodedFile);
 
-    if (!decodedFile || !fs.existsSync(filePath)) {
-        return res.status(404).json({ error: 'Not found', path: filePath });
+    // Protección contra path traversal
+    const resolvedMediaDir = path.resolve(mediaDirectory);
+    const resolvedFilePath = path.resolve(filePath);
+    if (!resolvedFilePath.startsWith(resolvedMediaDir + path.sep) && resolvedFilePath !== resolvedMediaDir) {
+        return res.status(403).json({ error: 'Forbidden: path traversal attempt' });
     }
-    
+
+    if (!decodedFile || !fs.existsSync(filePath)) {
+        return res.status(404).json({ error: 'Not found' });
+    }
+
     req.url = '/' + decodedFile;
     return mediaStatic(req, res, next);
 });

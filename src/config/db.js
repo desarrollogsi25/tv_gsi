@@ -7,7 +7,7 @@ const path = require('path');
 const fs = require('fs');
 
 const port = parseInt(process.env.PORT, 10) || 3002;
-const databasePassword = process.env.PG_PASSWORD || (process.env.NODE_ENV === 'production' ? null : '');
+const databasePassword = process.env.PG_APP_PASSWORD || process.env.PG_PASSWORD || (process.env.NODE_ENV === 'production' ? null : '');
 if (process.env.NODE_ENV === 'production' && !databasePassword) {
     throw new Error('PG_PASSWORD must be set when NODE_ENV=production.');
 }
@@ -16,7 +16,7 @@ if (process.env.NODE_ENV === 'production' && !databasePassword) {
 const pool = new Pool({
     host: process.env.PG_HOST || '127.0.0.1',
     port: parseInt(process.env.PG_PORT, 10) || 5432,
-    user: process.env.PG_USER || 'tv',
+    user: process.env.PG_APP_USER || process.env.PG_USER || 'nexus_app',
     password: databasePassword,
     database: process.env.PG_DATABASE || 'nexus_tv',
     max: 20,
