@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { io } from 'socket.io-client';
 import { createWaitingPairingSocket } from '../utils/waitingPairingSocket';
 import axios from 'axios';
-import { showConfirmation } from './Toast';
+import { showConfirmation } from '../utils/toastBus';
 import YouTubePlayer from './YouTubePlayer';
 import { createSeededRandom, getMediaKind, getNextIndex, getYouTubeVideoId, playbackDurationMs, shuffleIndices } from '../utils/playlistPlayback.mjs';
 import './TVPlayer.css';
@@ -11,7 +11,9 @@ const API_BASE = import.meta.env.VITE_API_URL || '';
 
 export default function TVPlayer() {
     const [tvUuid, setTvUuid] = useState(localStorage.getItem('tv_uuid') || '');
-    const [deviceToken, setDeviceToken] = useState(() => localStorage.getItem('tv_device_token') || '');
+    // El valor del token solo se persiste/emplaza; nunca se lee del estado
+    // (se consulta desde localStorage), por eso solo se conserva el setter.
+    const [, setDeviceToken] = useState(() => localStorage.getItem('tv_device_token') || '');
     const [screenName, setScreenName] = useState('');
     const [screenLocation, setScreenLocation] = useState('');
     const [isRegistered, setIsRegistered] = useState(false);
@@ -208,15 +210,23 @@ export default function TVPlayer() {
         }
     };
 
+    // Patrón "latest ref": el listener global de interacción accede a la
+    // versión más reciente de unlockAudio (con su volumen actual) sin
+    // re-suscribirse en cada render.
+    const unlockAudioRef = useRef(unlockAudio);
+    useEffect(() => {
+        unlockAudioRef.current = unlockAudio;
+    });
+
     // ─────────────────────────────────────────────────────────
     // Desbloqueo universal con cualquier interacción física en la TV
     // (Control remoto IR/Bluetooth, Tecla, Mouse o Pantalla Táctil)
     // ─────────────────────────────────────────────────────────
     useEffect(() => {
         const handleGlobalInteraction = () => {
-            if (!isAudioUnlocked) {
+            if (!isAudioUnlockedRef.current) {
                 console.log('🔓 [TV Audio] Interacción física detectada. Activando audio permanentemente.');
-                unlockAudio(true);
+                unlockAudioRef.current(true);
             }
         };
 
@@ -231,7 +241,7 @@ export default function TVPlayer() {
             window.removeEventListener('touchstart', handleGlobalInteraction);
             window.removeEventListener('pointerdown', handleGlobalInteraction);
         };
-    }, [isAudioUnlocked, volumeLevel]);
+    }, []);
 
     // ─────────────────────────────────────────────────────────
     // Reloj en tiempo real

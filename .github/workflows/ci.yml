@@ -14,12 +14,50 @@ jobs:
   backend-lint-and-syntax:
     name: Backend Syntax & Unit Tests
     runs-on: ubuntu-latest
+    services:
+      # ═══════════════════════════════════════════════════════════
+      # Bases QA efímeras, exclusivas del workflow y destruidas
+      # con el job. Reproducen el entorno QA aislado documentado
+      # (127.0.0.1:25499 con marcador QA_ISOLATED_DB_25499_VALIDATED
+      # y 127.0.0.1:25498 con marcador QA_CLEAN_BOOTSTRAP_25498_VALIDATED).
+      # Ningún servicio escucha en 25432 ni contiene datos reales.
+      # ═══════════════════════════════════════════════════════════
+      qa_db:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: qa_admin
+          POSTGRES_PASSWORD: qa_secure_password_2026
+          POSTGRES_DB: nexus_tv
+          PG_APP_USER: nexus_app
+          PG_APP_PASSWORD: nexus_app_runtime_pw_2026
+        ports:
+          - 25499:5432
+        options: >-
+          --health-cmd "pg_isready -U qa_admin -d nexus_tv"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      bootstrap_db:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: qa_bootstrap_admin_pw_2026
+          POSTGRES_DB: nexus_tv
+          PG_APP_USER: nexus_app
+          PG_APP_PASSWORD: qa_bootstrap_app_pw_2026
+        ports:
+          - 25498:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d nexus_tv"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node.js v24 LTS
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: 'npm'
@@ -40,18 +78,196 @@ jobs:
           node --check src/routes/media.js
           node --check src/sockets/index.js
 
+      # Inicializa cada base QA efímera desde cero aplicando el mismo
+      # procedimiento documentado en local: migraciones 01→07 en orden
+      # estricto (la 06 consume PG_APP_USER/PG_APP_PASSWORD del entorno
+      # del contenedor vía \getenv de psql) y marcador de identidad
+      # mediante COMMENT ON DATABASE (mecanismo que consulta qa-guard).
+      - name: Provision isolated QA databases (migrations 01-07 + identity markers)
+        env:
+          QA_DB_ID: ${{ job.services.qa_db.id }}
+          BOOTSTRAP_DB_ID: ${{ job.services.bootstrap_db.id }}
+        run: |
+          set -euo pipefail
+          MIGRATIONS="migrations/01_init_nexus_tv.sql migrations/02_playlist_content_24_7.sql migrations/03_playlist_ordering.sql migrations/04_distribute_library_content.sql migrations/04_sync_screen_id_sequence.sql migrations/05_device_auth.sql migrations/06_runtime_user.sql migrations/07_pending_pairings.sql"
+
+          # Espera acotada a que la base exista y acepte consultas (evita la
+          # carrera con la fase de inicialización del entrypoint de postgres).
+          wait_for_socket_db() {
+            local container=$1 user=$2
+            echo "Esperando que ${container} tenga la base nexus_tv operativa..."
+            for i in $(seq 1 60); do
+              if docker exec "$container" psql -U "$user" -d nexus_tv -Atc "SELECT 1" >/dev/null 2>&1; then
+                echo "Base nexus_tv operativa en ${container}."
+                return 0
+              fi
+              sleep 2
+            done
+            echo "::error::La base nexus_tv de ${container} no quedó operativa"
+            return 1
+          }
+
+          # Espera acotada al servidor final escuchando por TCP en el puerto
+          # publicado (la temp server de initdb solo usa el socket unix).
+          wait_for_tcp() {
+            local port=$1
+            echo "Esperando que 127.0.0.1:${port} acepte conexiones TCP..."
+            for i in $(seq 1 60); do
+              if (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
+                exec 3>&- 3<&- 2>/dev/null || true
+                echo "TCP listo en 127.0.0.1:${port}."
+                return 0
+              fi
+              sleep 2
+            done
+            echo "::error::127.0.0.1:${port} no aceptó conexiones TCP"
+            return 1
+          }
+
+          wait_for_socket_db "$QA_DB_ID" qa_admin
+          wait_for_socket_db "$BOOTSTRAP_DB_ID" postgres
+          wait_for_tcp 25499
+          wait_for_tcp 25498
+
+          echo "=== QA 25499 (container ${QA_DB_ID}) ==="
+          for f in $MIGRATIONS; do
+            echo "-- applying $f to QA 25499"
+            docker exec -i "$QA_DB_ID" psql -U qa_admin -d nexus_tv -v ON_ERROR_STOP=1 < "$f"
+          done
+          docker exec "$QA_DB_ID" psql -U qa_admin -d nexus_tv -c "COMMENT ON DATABASE nexus_tv IS 'QA_ISOLATED_DB_25499_VALIDATED';"
+
+          echo "=== QA 25498 (container ${BOOTSTRAP_DB_ID}) ==="
+          for f in $MIGRATIONS; do
+            echo "-- applying $f to QA 25498"
+            docker exec -i "$BOOTSTRAP_DB_ID" psql -U postgres -d nexus_tv -v ON_ERROR_STOP=1 < "$f"
+          done
+          docker exec "$BOOTSTRAP_DB_ID" psql -U postgres -d nexus_tv -c "COMMENT ON DATABASE nexus_tv IS 'QA_CLEAN_BOOTSTRAP_25498_VALIDATED';"
+
+      # Verificación fallarina (sin simulación): marcador legible,
+      # login real scram-sha-256 de nexus_app por el puerto mapeado y
+      # base correcta en ambas QA. Si algo falla, el job termina en rojo.
+      - name: Verify QA identity markers and runtime credentials
+        env:
+          QA_DB_ID: ${{ job.services.qa_db.id }}
+          BOOTSTRAP_DB_ID: ${{ job.services.bootstrap_db.id }}
+        run: |
+          set -euo pipefail
+          M25499=$(docker exec "$QA_DB_ID" psql -U qa_admin -d nexus_tv -tAc "SELECT s.description FROM pg_shdescription s JOIN pg_database d ON d.oid = s.objoid WHERE d.datname = 'nexus_tv'")
+          test "$M25499" = "QA_ISOLATED_DB_25499_VALIDATED"
+          M25498=$(docker exec "$BOOTSTRAP_DB_ID" psql -U postgres -d nexus_tv -tAc "SELECT s.description FROM pg_shdescription s JOIN pg_database d ON d.oid = s.objoid WHERE d.datname = 'nexus_tv'")
+          test "$M25498" = "QA_CLEAN_BOOTSTRAP_25498_VALIDATED"
+          echo "Marcadores de identidad verificados en ambas bases QA."
+
+          node <<'EOF'
+          const { Client } = require('pg');
+          const check = async (port, password, label) => {
+              const c = new Client({ host: '127.0.0.1', port, database: 'nexus_tv', user: 'nexus_app', password, connectionTimeoutMillis: 5000 });
+              await c.connect();
+              const who = await c.query('SELECT current_user::text AS u, current_database()::text AS d');
+              const marker = await c.query("SELECT s.description FROM pg_shdescription s JOIN pg_database dd ON dd.oid = s.objoid WHERE dd.datname = current_database()");
+              const roles = await c.query("SELECT rolsuper, rolcanlogin FROM pg_roles WHERE rolname = 'nexus_app'");
+              await c.end();
+              if (who.rows[0].u !== 'nexus_app' || who.rows[0].d !== 'nexus_tv') throw new Error(label + ': identidad de sesión inesperada');
+              if (!marker.rows[0].description) throw new Error(label + ': marcador de identidad ausente');
+              if (roles.rows[0].rolsuper !== false || roles.rows[0].rolcanlogin !== true) throw new Error(label + ': rol nexus_app con atributos inesperados');
+              console.log(label + ' OK — user=' + who.rows[0].u + ' db=' + who.rows[0].d + ' marker=' + marker.rows[0].description + ' superuser=false');
+          };
+          (async () => {
+              await check(25499, 'nexus_app_runtime_pw_2026', 'QA25499');
+              await check(25498, 'qa_bootstrap_app_pw_2026', 'QA25498');
+          })().catch((e) => { console.error(e); process.exit(1); });
+          EOF
+
+      # Contrastes negativos de aislamiento (reales, sin simulación):
+      # 1) Puerto de producción 25432 -> rechazo ANTES de conectarse.
+      # 2) Nombre de base no autorizado en 25499 -> rechazo de parámetros.
+      # 3) Marcador de identidad ausente -> se suprime temporalmente el
+      #    comentario en la base efímera, se exige el rechazo del guard
+      #    y se RESTAURA siempre el marcador antes de evaluar el código
+      #    de salida. Si el guard dejara de rechazar, el job queda en rojo.
+      - name: Verify isolation controls reject unauthorized targets
+        env:
+          QA_DB_ID: ${{ job.services.qa_db.id }}
+        run: |
+          set -euo pipefail
+
+          echo "--- Caso 1: destino de producción (puerto 25432) ---"
+          node <<'EOF'
+          const { assertAuthorizedQaEnvironment } = require('./tests/qa-guard.js');
+          (async () => {
+              try {
+                  await assertAuthorizedQaEnvironment({ host: '127.0.0.1', port: 25432, database: 'nexus_tv', user: 'nexus_app', password: 'x' }, 'nexus_app');
+                  console.error('::error::El guard ACEPTÓ el puerto de producción 25432');
+                  process.exit(1);
+              } catch (e) {
+                  console.log('OK — rechazado destino de producción 25432:', e.message.split('\n')[0]);
+              }
+          })().catch((e) => { console.error(e); process.exit(1); });
+          EOF
+
+          echo "--- Caso 2: nombre de base no autorizado en el puerto QA ---"
+          node <<'EOF'
+          const { assertAuthorizedQaEnvironment } = require('./tests/qa-guard.js');
+          (async () => {
+              try {
+                  await assertAuthorizedQaEnvironment({ host: '127.0.0.1', port: 25499, database: 'postgres', user: 'qa_admin', password: 'qa_secure_password_2026' }, 'qa_admin');
+                  console.error('::error::El guard ACEPTÓ un nombre de base no autorizado');
+                  process.exit(1);
+              } catch (e) {
+                  console.log('OK — rechazada base no autorizada:', e.message.split('\n')[0]);
+              }
+          })().catch((e) => { console.error(e); process.exit(1); });
+          EOF
+
+          echo "--- Caso 3: base QA real SIN marcador de identidad ---"
+          docker exec "$QA_DB_ID" psql -U qa_admin -d nexus_tv -c "COMMENT ON DATABASE nexus_tv IS NULL;"
+          set +e
+          node <<'EOF'
+          const { assertAuthorizedQaEnvironment } = require('./tests/qa-guard.js');
+          (async () => {
+              try {
+                  await assertAuthorizedQaEnvironment({
+                      host: '127.0.0.1', port: 25499, database: 'nexus_tv',
+                      user: 'nexus_app', password: 'nexus_app_runtime_pw_2026'
+                  }, 'nexus_app');
+                  console.error('::error::El guard ACEPTÓ una base QA sin marcador de identidad');
+                  process.exit(1);
+              } catch (e) {
+                  console.log('OK — rechazada base sin marcador de identidad:', e.message.split('\n')[0]);
+              }
+          })().catch((e) => { console.error(e); process.exit(1); });
+          EOF
+          MARKER_RC=$?
+          set -e
+          docker exec "$QA_DB_ID" psql -U qa_admin -d nexus_tv -c "COMMENT ON DATABASE nexus_tv IS 'QA_ISOLATED_DB_25499_VALIDATED';"
+          M25499=$(docker exec "$QA_DB_ID" psql -U qa_admin -d nexus_tv -tAc "SELECT s.description FROM pg_shdescription s JOIN pg_database d ON d.oid = s.objoid WHERE d.datname = 'nexus_tv'")
+          test "$M25499" = "QA_ISOLATED_DB_25499_VALIDATED"
+          echo "Marcador restaurado y verificado tras el contraste negativo."
+          test "$MARKER_RC" -eq 0
+
+          echo "Controles de aislamiento verificados con casos negativos reales."
+
       - name: Run Unit Tests
         run: npm test
+
+      # Los contenedores QA desaparecen con el runner; esta limpieza
+      # explícita documenta y garantiza la efimeridad incluso en re-ejecuciones.
+      - name: Cleanup ephemeral QA databases
+        if: always()
+        env:
+          QA_DB_ID: ${{ job.services.qa_db.id }}
+          BOOTSTRAP_DB_ID: ${{ job.services.bootstrap_db.id }}
+        run: docker rm -f "$QA_DB_ID" "$BOOTSTRAP_DB_ID" || echo "contenedores QA ya eliminados"
 
   frontend-lint-and-build:
     name: Frontend Build & Oxlint
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node.js v24 LTS
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: 'npm'
@@ -74,7 +290,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Validate Compose File
         env:

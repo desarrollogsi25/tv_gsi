@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import axios from 'axios';
 import { io } from 'socket.io-client';
-import { API_URL } from '../Admin';
+import { API_URL } from '../../utils/apiUrl';
 
 export default function TVControl() {
     const { uuid } = useParams();

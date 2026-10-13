@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
-import { API_URL } from '../Admin';
+import { API_URL } from '../../utils/apiUrl';
 
 export default function BroadcastPanel() {
     const [screens, setScreens] = useState([]);
@@ -57,7 +57,11 @@ export default function BroadcastPanel() {
     };
 
     useEffect(() => {
-        loadData();
+        // Límite async explícito: el setState derivado de la petición ocurre
+        // fuera del cuerpo síncrono del efecto (regla set-state-in-effect).
+        (async () => {
+            await loadData();
+        })();
         const interval = setInterval(loadData, 5000);
         return () => clearInterval(interval);
     }, []);

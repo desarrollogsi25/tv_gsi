@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
-import { API_URL } from '../Admin';
-import { showToast } from '../Toast';
+import { API_URL } from '../../utils/apiUrl';
+import { showToast } from '../../utils/toastBus';
 
 export default function TVRegister() {
     const [waitingScreens, setWaitingScreens] = useState([]);
@@ -30,7 +30,11 @@ export default function TVRegister() {
     };
 
     useEffect(() => {
-        loadData();
+        // Límite async explícito: el setState derivado de la petición ocurre
+        // fuera del cuerpo síncrono del efecto (regla set-state-in-effect).
+        (async () => {
+            await loadData();
+        })();
         // Polling cada 4 segundos para detectar nuevas TVs en la red automáticamente
         const interval = setInterval(loadData, 4000);
         return () => clearInterval(interval);

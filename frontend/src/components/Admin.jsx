@@ -7,8 +7,6 @@ import BroadcastPanel from './admin/BroadcastPanel';
 import ContentManager from './admin/ContentManager';
 import './Admin.css';
 
-export const API_URL = import.meta.env.VITE_API_URL || '';
-
 const Admin = () => {
     const location = useLocation();
 

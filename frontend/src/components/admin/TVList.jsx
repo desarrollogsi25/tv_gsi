@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import axios from 'axios';
-import { API_URL } from '../Admin';
-import { showToast, showConfirmation } from '../Toast';
+import { API_URL } from '../../utils/apiUrl';
+import { showToast, showConfirmation } from '../../utils/toastBus';
 
 export default function TVList() {
     const [screens, setScreens] = useState([]);
@@ -23,7 +23,11 @@ export default function TVList() {
     };
 
     useEffect(() => {
-        fetchScreens();
+        // Límite async explícito: el setState derivado de la petición ocurre
+        // fuera del cuerpo síncrono del efecto (regla set-state-in-effect).
+        (async () => {
+            await fetchScreens();
+        })();
     }, []);
 
     const handleQuickReload = async (uuid) => {

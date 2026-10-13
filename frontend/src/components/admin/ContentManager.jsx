@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
-import { API_URL } from '../Admin';
-import { showToast, showConfirmation } from '../Toast';
+import { API_URL } from '../../utils/apiUrl';
+import { showToast, showConfirmation } from '../../utils/toastBus';
 
 export default function ContentManager() {
     const [activeTab, setActiveTab] = useState('library'); // 'library' | 'upload' | 'external' | 'playlists'
@@ -55,8 +55,20 @@ export default function ContentManager() {
         }
     };
 
+    // Ref de "última versión": el efecto de carga inicial ejecuta la loadData
+    // más reciente sin exponerla como dependencia reactiva del efecto (evita
+    // re-ejecuciones en cadena cuando cambia selectedPlaylistId).
+    const loadDataRef = useRef(loadData);
     useEffect(() => {
-        loadData();
+        loadDataRef.current = loadData;
+    });
+
+    useEffect(() => {
+        // Límite async explícito: el setState derivado de la petición ocurre
+        // fuera del cuerpo síncrono del efecto (regla set-state-in-effect).
+        (async () => {
+            await loadDataRef.current();
+        })();
     }, []);
 
     // Cargar detalles de playlist seleccionada
