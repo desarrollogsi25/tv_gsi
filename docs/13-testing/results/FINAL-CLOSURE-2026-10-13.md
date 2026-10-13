@@ -183,3 +183,18 @@ Batería `E2E-1` ejecutada **pre y post** despliegue del Nginx endurecido: **38 
 | Árbol tras publicación | limpio (`git status --short` = 0 líneas); `backups/` ignorado (`.gitignore`) |
 
 **Nota de autenticación (transparencia):** `fetch`/`ls-remote` funcionan de forma anónima (el repo es legible públicamente); el `push` requiere credenciales. El helper de credenciales no estaba configurado para el git del entorno (su config global es `/root/.gitconfig`, distinta del HOME de `gh`). Se ejecutó el push usando el token almacenado por `gh` (autenticado como `desarrollogsi25`, alcance `repo`) en modo **one-shot dentro del proceso de git**, con la salida redactada — el token no se imprimió, no se persistió en ningún fichero ni configuración y no queda en el repositorio. Para persistir la autenticación en su sesión habitual: `gh auth setup-git` (o `git config --global credential.helper "C:/Program Files/GitHub CLI/gh.exe auth git-credential"`).
+
+---
+
+## 14. Anexo posterior (2026-10-13) — Misión correctiva: CI verde real en GitHub
+
+> Sección añadida después del cierre original por una misión correctiva posterior. **El texto precedente de este informe no se ha modificado.**
+
+| Elemento | Evidencia |
+|---|---|
+| Hallazgo posterior al cierre | El run #16 (`38431545080`, sobre `3675104`) falló en el job backend con 26× `ECONNREFUSED 127.0.0.1:25499/25498`: el runner de GitHub no tiene las bases QA (existían solo como contenedores persistentes locales), aunque el push fue limpio y el frontend/compose estaban en verde |
+| Remediación (commit `780e9c8`) | Bases QA **efímeras** como `services:` en el workflow (mismas identidades, puertos y marcadores que exige `tests/qa-guard.js`); migraciones 01→07 en orden estricto + `COMMENT ON DATABASE`; verificación fallarina de marcadores y login scram reales; **contraste negativo real** del guard (incluida la supresión temporal y restauración verificada del marcador); limpieza `if: always()`; `checkout@v5`/`setup-node@v5`. Frontend: 10 advertencias de oxlint → **0** (extracción de `utils/toastBus.js` y `utils/apiUrl.js`, IIFE async y patrones "latest ref"), sin desactivar reglas |
+| Reproducción local | Procedimiento idéntico al CI ejecutado sobre bases efímeras locales: migraciones 0 errores, identidad OK, 3/3 controles negativos, suite **187/184/0/3**, oxlint 0, build OK, compose OK, audits 0 |
+| Publicación | `780e9c8` (código) + `e9e1566` (informe) — push fast-forward sin reescritura; `ls-remote` == `HEAD` |
+| Run de verificación | [`38450894872`](https://github.com/desarrollogsi25/tv_gsi/actions/runs/38450894872) sobre `e9e1566` — **success en los 3 jobs**; backend `187 tests / 184 pass / 0 fail / 3 skipped` (los skips son los habituales de `ffmpeg`/`ffprobe` del host, ejecutados realmente en el contenedor Docker en verificaciones previas) |
+| Informe completo | `docs/13-testing/results/CI-REMEDIATION-REPORT-2026-10-13.md` (causa raíz, cambios, garantías de aislamiento, reproducción, resultados por job, advertencias corregidas, SHA y run) |

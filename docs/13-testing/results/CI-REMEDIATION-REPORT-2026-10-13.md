@@ -159,10 +159,34 @@ Nota local (externa al repo): en Windows, npm 10.8.2 tiene el bug conocido de op
 |---|---|
 | Commit de código | `780e9c8ab282b3f5c6ba6651f926f5c69cfcee3c` — `fix(ci): [CI-VERDE] bases QA efimeras en Actions, oxlint 0 warnings y actions v5` |
 | Contenido | 11 ficheros: `.github/workflows/ci.yml` + 9 componentes frontend + 2 utilidades nuevas (`utils/toastBus.js`, `utils/apiUrl.js`) |
-| Verificación de la ejecución real de Actions | completada en **§9 (anexo posterior)** tras observar el run publicado |
+| Commit de documentación | `e9e1566` — este informe |
+| Rama publicada | `main` — push **fast-forward** `3675104..e9e1566`, sin `--force`, sin reescritura de historia, sin tocar ramas ni etiquetas |
+| Verificación remota | `git ls-remote origin refs/heads/main` → `e9e156655273c6b40a2544421902e814a3b81c36` **==** `git rev-parse HEAD` |
+| Run de verificación | [`38450894872`](https://github.com/desarrollogsi25/tv_gsi/actions/runs/38450894872) sobre `e9e1566` — **success en los 3 jobs** (evidencia en §9) |
 
 ---
 
-## 9. Anexo posterior — resultado de la ejecución real de GitHub Actions
+## 9. Resultado de la ejecución real de GitHub Actions
 
-*(Sección añadida tras la publicación y la observación del run; ver commit de documentación.)*
+### 9.1 Run de verificación (observado en GitHub, sin simular)
+
+| Elemento | Evidencia (`gh run view 38450894872`) |
+|---|---|
+| Run | `38450894872` sobre `e9e156655273c6b40a2544421902e814a3b81c36` — `status: completed`, **`conclusion: success`** |
+| `Backend Syntax & Unit Tests` | **success** — 18:57:02Z → 18:57:32Z (~30 s) |
+| `Frontend Build & Oxlint` | **success** — 18:57:02Z → 18:57:10Z |
+| `Docker Compose Syntax Validation` | **success** — 18:57:02Z → 18:57:07Z |
+| Contraste con el run #16 | el job backend que falló con 26× `ECONNREFUSED` sobre `3675104` termina ahora en verde ejecutando la suite completa contra bases QA reales provisionadas en el propio runner |
+
+### 9.2 Evidencia literal del log del run
+
+- **Provisionamiento:** `Base nexus_tv operativa en <container>` (ambas bases) y `TCP listo en 127.0.0.1:25499` / `TCP listo en 127.0.0.1:25498`.
+- **Identidad y credenciales:** `Marcadores de identidad verificados en ambas bases QA.` · `QA25499 OK — user=nexus_app db=nexus_tv marker=QA_ISOLATED_DB_25499_VALIDATED superuser=false` · `QA25498 OK — user=nexus_app db=nexus_tv marker=QA_CLEAN_BOOTSTRAP_25498_VALIDATED superuser=false`.
+- **Aislamiento:** `Marcador restaurado y verificado tras el contraste negativo.` · `Controles de aislamiento verificados con casos negativos reales.`
+- **Suite completa:** `# tests 187` · `# pass 184` · `# fail 0` · `# skipped 3` — idéntico a la reproducción local de §5.
+
+### 9.3 Cierre de la misión
+
+Los 3 jobs en verde en GitHub. Criterio de aceptación cumplido: el CI ejecuta la suite **real** completa (bases QA efímeras reales construidas con las migraciones del repo y con los marcadores de identidad exigidos por la guardia, verificadas con login scram real y ensayadas en negativo por el propio pipeline) y termina verde en la plataforma, no solo en local. Las 3 omisiones son los skips habituales de `ffmpeg`/`ffprobe` del host (por diseño; ya se ejecutan realmente dentro del contenedor Docker en las verificaciones documentadas en informes anteriores). Ninguna regla de lint desactivada, ninguna supresión general, ninguna prueba mockeada u omitida, la guardia de aislamiento intacta y además ensayada en negativo dentro del CI.
+
+*Nota:* las publicaciones de documentación posteriores (sin cambios de código) vuelven a disparar esta misma tubería de 3 jobs.
