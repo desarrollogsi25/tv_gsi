@@ -4,16 +4,18 @@ services:
     image: postgres:17-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${PG_USER:-tv}
-      POSTGRES_PASSWORD: ${PG_PASSWORD:?Set PG_PASSWORD in .env}
+      POSTGRES_USER: ${PG_ADMIN_USER:-postgres}
+      POSTGRES_PASSWORD: ${PG_ADMIN_PASSWORD:-${PG_PASSWORD:?Set PG_ADMIN_PASSWORD in .env}}
       POSTGRES_DB: ${PG_DATABASE:-nexus_tv}
+      PG_APP_USER: ${PG_APP_USER:-nexus_app}
+      PG_APP_PASSWORD: ${PG_APP_PASSWORD:-${PG_PASSWORD:?Set PG_APP_PASSWORD in .env}}
     ports:
-      - "${HOST_DB_PORT:-25432}:5432"
+      - "${HOST_DB_BIND:-127.0.0.1}:${HOST_DB_PORT:-25432}:5432"
     volumes:
       - tv_pgdata:/var/lib/postgresql/data
       - ./migrations:/docker-entrypoint-initdb.d
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-tv} -d ${PG_DATABASE:-nexus_tv}"]
+      test: ["CMD-SHELL", "pg_isready -U ${PG_ADMIN_USER:-postgres} -d ${PG_DATABASE:-nexus_tv}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -36,11 +38,17 @@ services:
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:28080,http://127.0.0.1:28080}
       - PG_HOST=db
       - PG_PORT=5432
-      - PG_USER=${PG_USER:-tv}
-      - PG_PASSWORD=${PG_PASSWORD:?Set PG_PASSWORD in .env}
+      - PG_APP_USER=${PG_APP_USER:-nexus_app}
+      - PG_APP_PASSWORD=${PG_APP_PASSWORD:-${PG_PASSWORD:?Set PG_APP_PASSWORD in .env}}
       - PG_DATABASE=${PG_DATABASE:-nexus_tv}
       - PORT=3002
       - MEDIA_DIR=/app/media
+      # AUD-007: clave HMAC de URLs firmadas; el backend falla de forma segura
+      # (sin emitir ni validar firmas) si la variable está vacía.
+      - MEDIA_URL_SIGNING_KEY=${MEDIA_URL_SIGNING_KEY:-}
+      # AUD-006: valores seguros por defecto si .env no los define.
+      - ALLOW_QUERY_DEVICE_TOKEN=${ALLOW_QUERY_DEVICE_TOKEN:-false}
+      - OBSERVE_QUERY_DEVICE_TOKEN=${OBSERVE_QUERY_DEVICE_TOKEN:-false}
     depends_on:
       db:
         condition: service_healthy

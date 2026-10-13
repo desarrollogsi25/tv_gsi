@@ -79,7 +79,7 @@ if ($Option -eq "1") {
     Write-Host "[OK] Entorno local iniciado exitosamente." -ForegroundColor $Green
     Write-Host "==================================================================" -ForegroundColor $Cyan
     Write-Host "  Database PostgreSQL (v17)      : localhost:25432 (nexus_tv)" -ForegroundColor $Green
-    Write-Host "  Backend API & Sockets (Node 20): http://localhost:23002" -ForegroundColor $Green
+    Write-Host "  Backend API & Sockets (Node 24 LTS): http://localhost:23002" -ForegroundColor $Green
     Write-Host "  Frontend Web SPA (Nginx)       : http://localhost:28080" -ForegroundColor $Green
     Write-Host "  Digital Signage Player (TV)    : http://localhost:28080/tv" -ForegroundColor $Cyan
     Write-Host "  Admin Control Center           : http://localhost:28080/admin" -ForegroundColor $Cyan

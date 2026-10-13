@@ -314,9 +314,31 @@ export default function ContentManager() {
                                     <td><code style={{ fontSize: '0.8rem' }}>{item.source_type}</code></td>
                                     <td>{item.duration_seconds ? `${item.duration_seconds}s` : 'Auto'}</td>
                                     <td>
-                                        <button className="btn-danger" onClick={() => handleDeleteContent(item.id, item.source_url)}>
-                                            🗑️ Eliminar
-                                        </button>
+                                        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                                            {item.source_type === 'local_file' && (
+                                                <button
+                                                    className="btn-secondary"
+                                                    style={{ padding: '6px 10px', fontSize: '0.75rem' }}
+                                                    onClick={async () => {
+                                                        try {
+                                                            const res = await axios.get(`${API_URL}/api/admin/media/preview-url/${item.id}`, {
+                                                                headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+                                                            });
+                                                            if (res.data.success) {
+                                                                window.open(`${API_URL}${res.data.signed_url}`, '_blank');
+                                                            }
+                                                        } catch (err) {
+                                                            showToast('Error generando preview: ' + (err.response?.data?.message || err.message), 'error');
+                                                        }
+                                                    }}
+                                                >
+                                                    👁️ Preview
+                                                </button>
+                                            )}
+                                            <button className="btn-danger" onClick={() => handleDeleteContent(item.id, item.source_url)}>
+                                                🗑️ Eliminar
+                                            </button>
+                                        </div>
                                     </td>
                                 </tr>
                             ))}

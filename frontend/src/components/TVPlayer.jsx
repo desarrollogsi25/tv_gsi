@@ -274,6 +274,63 @@ export default function TVPlayer() {
     };
 
     // ─────────────────────────────────────────────────────────
+    // Obtener URL firmada para contenido local (AUD-007 / MISIÓN 5)
+    // ─────────────────────────────────────────────────────────
+    const [signedUrls, setSignedUrls] = useState({}); // contentId -> { url, expiresAt }
+
+    const fetchSignedUrl = useCallback(async (contentId, contentType) => {
+        if (!tvUuid) return null;
+        const token = localStorage.getItem('tv_device_token');
+        if (!token) return null;
+
+        try {
+            const res = await axios.get(`${API_BASE}/api/tv/${tvUuid}/playback-url/${contentId}`, {
+                headers: { 'X-Device-Token': token }
+            });
+            if (res.data.success) {
+                const expiresAt = Date.now() + (res.data.expires_in * 1000);
+                setSignedUrls(prev => ({
+                    ...prev,
+                    [contentId]: { url: res.data.signed_url, expiresAt, contentType }
+                }));
+                return res.data.signed_url;
+            }
+        } catch (err) {
+            console.error('Error obteniendo URL firmada:', err?.response?.data?.message || err.message);
+            if (err?.response?.status === 401) {
+                localStorage.removeItem('tv_device_token');
+                setDeviceToken('');
+                setIsRegistered(false);
+            }
+        }
+        return null;
+    }, [tvUuid]);
+
+    // Obtener URL de reproducción (firmada para local, original para externa)
+    const getPlaybackUrl = useCallback((item) => {
+        if (!item) return '';
+
+        // URLs externas (YouTube, Power BI, HTTP) se usan tal cual
+        if (item.source_url.startsWith('http')) {
+            return item.source_url;
+        }
+
+        // Archivos locales: usar URL firmada si disponible y no expirada
+        const signed = signedUrls[item.content_id ?? item.id];
+        if (signed && signed.expiresAt > Date.now()) {
+            return `${API_BASE}${signed.url}`;
+        }
+
+        // Si no hay URL firmada válida, intentar obtener una (async, no bloquea)
+        // Devolver URL original como fallback; el componente se actualizará cuando llegue la firmada
+        if (item.source_type === 'local_file') {
+            fetchSignedUrl(item.content_id ?? item.id, item.content_type);
+        }
+
+        return `${API_BASE}${item.source_url}`;
+    }, [signedUrls, fetchSignedUrl]);
+
+    // ─────────────────────────────────────────────────────────
     // Autenticación inicial y verificación de pantalla
     // ─────────────────────────────────────────────────────────
     useEffect(() => {
@@ -305,6 +362,10 @@ export default function TVPlayer() {
                 }
             } catch (err) {
                 console.warn('Pantalla no registrada o credencial inválida:', err?.response?.data?.message || err.message);
+                if (err?.response?.status === 401) {
+                    localStorage.removeItem('tv_device_token');
+                    setDeviceToken('');
+                }
                 setIsRegistered(false);
             }
         };
@@ -331,25 +392,56 @@ export default function TVPlayer() {
         socket.on('connect_error', (err) => {
             console.warn('⚠️ [Control Socket Error]:', err.message);
             if (err.message && (err.message.includes('authentication failed') || err.message.includes('credentials') || err.message.includes('inactive'))) {
+                localStorage.removeItem('tv_device_token');
+                setDeviceToken('');
                 setIsRegistered(false);
             }
         });
 
         socket.on('command:rejected', () => setIsRejected(true));
 
-        // 1. Asignación remota de usuario/perfil desde el Admin
-        socket.on('command:assign_profile', (profile) => {
-            console.log('🎉 Perfil asignado remotamente desde el Admin:', profile);
-            localStorage.setItem('tv_uuid', profile.tv_uuid);
-            if (profile.device_token) {
-                localStorage.setItem('tv_device_token', profile.device_token);
-                setDeviceToken(profile.device_token);
+        // 1. Asignación remota de usuario/perfil desde el Admin (AUD-005: confirmación explícita)
+        socket.on('command:assign_profile', (profile, ack) => {
+            const { device_token, ...safeProfile } = profile || {};
+            console.log('🎉 Perfil asignado remotamente desde el Admin:', safeProfile);
+            try {
+                if (!profile || !profile.tv_uuid) {
+                    throw new Error('Perfil inválido o sin tv_uuid');
+                }
+                localStorage.setItem('tv_uuid', profile.tv_uuid);
+                if (device_token) {
+                    localStorage.setItem('tv_device_token', device_token);
+                    setDeviceToken(device_token);
+                }
+                setTvUuid(profile.tv_uuid);
+                setScreenName(profile.name);
+                setScreenLocation(profile.location);
+                setIsRegistered(true);
+                loadPlaylist(profile.tv_uuid);
+
+                const ackPayload = {
+                    success: true,
+                    tv_uuid: profile.tv_uuid,
+                    pairingSessionId: profile.pairingSessionId
+                };
+                if (typeof ack === 'function') {
+                    ack(ackPayload);
+                }
+                socket.emit('tv:pairing_confirmed', ackPayload);
+            } catch (storageError) {
+                console.error('❌ Error guardando credenciales en TV:', storageError.message);
+                const rejectPayload = {
+                    success: false,
+                    tv_uuid: profile?.tv_uuid,
+                    pairingSessionId: profile?.pairingSessionId,
+                    reason: 'storage_error',
+                    message: storageError.message
+                };
+                if (typeof ack === 'function') {
+                    ack(rejectPayload);
+                }
+                socket.emit('tv:pairing_rejected', rejectPayload);
             }
-            setTvUuid(profile.tv_uuid);
-            setScreenName(profile.name);
-            setScreenLocation(profile.location);
-            setIsRegistered(true);
-            loadPlaylist(profile.tv_uuid);
         });
 
         // 2. Comandos generales de control remoto
@@ -862,7 +954,7 @@ export default function TVPlayer() {
                         <video
                             ref={videoRef}
                             className="tv-media-element tv-video-player"
-                            src={currentItem.source_url.startsWith('http') ? currentItem.source_url : `${API_BASE}${currentItem.source_url}`}
+                            src={getPlaybackUrl(currentItem)}
                             autoPlay={!isPaused}
                             playsInline
                             loop={playlist.length <= 1}
@@ -881,7 +973,7 @@ export default function TVPlayer() {
                     {getMediaKind(currentItem) === 'image' && (
                         <img
                             className="tv-media-element tv-image-player"
-                            src={currentItem.source_url.startsWith('http') ? currentItem.source_url : `${API_BASE}${currentItem.source_url}`}
+                            src={getPlaybackUrl(currentItem)}
                             alt={currentItem.title}
                             onError={handleImageError}
                         />
