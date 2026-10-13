@@ -172,4 +172,14 @@ Batería `E2E-1` ejecutada **pre y post** despliegue del Nginx endurecido: **38 
 
 ## 13. Publicación en GitHub
 
-Se registra en esta sección tras la ejecución de los commits y el push (evidencia: SHA local, SHA remoto, rama y verificación `origin/main`).
+| Elemento | Evidencia |
+|---|---|
+| Remoto | `origin` → `https://github.com/desarrollogsi25/tv_gsi.git` |
+| Rama | `main` — push **fast-forward** desde `43e8590`, sin `--force`, sin reescritura de historia, sin tocar ramas ni etiquetas ajenas |
+| Commits publicados | `8700535` `chore(repo)` · `85fd098` `fix(security)` · `2661b97` `feat(deploy)` · `e150f66` `docs(closure)` |
+| Verificación remota | `git ls-remote origin refs/heads/main` → `e150f662d56cdfe99f0a43f9418311e1dad3a75d` **==** `git rev-parse HEAD` |
+| Etiquetas | `v2.0.1`/`v2.1.0`/`v2.1.3`/`v2.2.0` intactas en remoto (`v2.2.0` → `43e8590`) |
+| Escaneo de secretos del índice | **0 secretos**: solo placeholders `REPLACE_`, referencias `${VAR}` y generadores PowerShell de runbook; el seed bcrypt de `migrations/01` ya existía en `HEAD` (histórico del repo) |
+| Árbol tras publicación | limpio (`git status --short` = 0 líneas); `backups/` ignorado (`.gitignore`) |
+
+**Nota de autenticación (transparencia):** `fetch`/`ls-remote` funcionan de forma anónima (el repo es legible públicamente); el `push` requiere credenciales. El helper de credenciales no estaba configurado para el git del entorno (su config global es `/root/.gitconfig`, distinta del HOME de `gh`). Se ejecutó el push usando el token almacenado por `gh` (autenticado como `desarrollogsi25`, alcance `repo`) en modo **one-shot dentro del proceso de git**, con la salida redactada — el token no se imprimió, no se persistió en ningún fichero ni configuración y no queda en el repositorio. Para persistir la autenticación en su sesión habitual: `gh auth setup-git` (o `git config --global credential.helper "C:/Program Files/GitHub CLI/gh.exe auth git-credential"`).

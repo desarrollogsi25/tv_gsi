@@ -211,7 +211,7 @@ Ejecutada según `DEV-RUN-005` v1.1. Evidencia completa: [`DEPLOY-LOG-2026-10-13
 
 ### 11.3 Publicación
 
-Los commits y la verificación remota se registran en [`FINAL-CLOSURE-2026-10-13.md`](./FINAL-CLOSURE-2026-10-13.md) §13 (evidencia: SHA local/remoto, rama `main`, remoto `origin`).
+Los commits y la verificación remota quedan registrados en [`FINAL-CLOSURE-2026-10-13.md`](./FINAL-CLOSURE-2026-10-13.md) §13: 4 commits publicados en `origin/main` (`8700535`, `85fd098`, `2661b97`, `e150f66`), SHA remoto verificado == local, etiquetas intactas, árbol limpio.
 
 ---
 
