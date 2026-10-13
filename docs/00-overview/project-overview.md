@@ -66,7 +66,7 @@ El sistema resuelve dos necesidades operativas fundamentales:
 
 * **Frontend:** React 19 + React Router DOM 7 + Axios + Socket.io-client + Vite 8.
 * **Web Server / Proxy:** Nginx Alpine (sirve SPA estático y redirige `/api/`, `/media/` y `/socket.io/`).
-* **Backend API & Sockets:** Node.js 20 (Alpine) + Express 5 + Socket.io 4 + Multer 2 + fluent-ffmpeg (FFmpeg binario nativo) + node-cron.
+* **Backend API & Sockets:** Node.js 24 LTS (Alpine) + Express 5 + Socket.io 4 + Multer 2 + fluent-ffmpeg (FFmpeg binario nativo) + node-cron.
 * **Base de Datos:** PostgreSQL 17 (Alpine) con esquema relacional dedicado `nexus_tv` y extensión `pgcrypto`.
 
 ---

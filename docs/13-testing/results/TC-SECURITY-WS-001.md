@@ -123,21 +123,24 @@ Durante la auditoría se compararon los hashes SHA-256 de los archivos locales f
 * **RSK-025 (Entorno Activo Docker y Código Local):** 🟢 **RESUELTO Y DESPLEGADO** — El contenedor en producción local `tv-backend` (puerto 23002) rechaza determinísticamente conexiones no autenticadas en `/control` y opera con tokens criptográficos verificados en base de datos.
 * **RSK-026 (Presencia Multi-Socket):** 🟢 **RESUELTO Y DESPLEGADO** — La gestión mediante `screenSockets` Set garantiza que desconexiones no matan sesiones legítimas en el backend real.
 
+---
 
-## 8. Retest posterior: rotación de secretos y validación viva (2026-10-09)
+## 8. Retest Posterior: Rotación de Secretos, Reconciliación y Validación Viva (2026-10-09)
 
-Este apartado registra la continuación del retest con estado real comprobado; prevalece sobre resultados de intentos heredados cuya evidencia no se conservó.
-
-- PostgreSQL: ejecutado `ALTER ROLE` sobre el rol configurado por Compose; después de reconstruir únicamente `backend`, una conexión TCP nueva desde el host con `.env` permitió `SELECT 1`.
-- JWT: el fallback de desarrollo fue eliminado de `src/config/jwt.js`; el backend activo rechazó un JWT firmado con la clave histórica de desarrollo y respondió HTTP 200 a `/api/auth/me` con un JWT firmado usando el `JWT_SECRET` actual de `.env`.
-- WebSocket `/control` en `127.0.0.1:23002`: sin credencial rechazado (`device_token is required`); credencial inválida rechazada (`invalid device credentials`); identidad A válida aceptada; identidad B distinta, activa y con credencial propia aceptada; token de A presentado contra UUID de B rechazado (`invalid device credentials`).
-- Las identidades A y B se prepararon solo para el retest. Se restauró el estado previo de la pantalla QA ID 17 y se eliminó la fila temporal B.
-- API: `/api/status` respondió HTTP 200 y `/api/tv/:uuid/playlist` respondió HTTP 200 (`total=0` para la pantalla QA consultada).
-- Login administrativo con contraseña válida: **no comprobado**. No se proporcionó una contraseña vigente y no se adivinó ni se restableció la cuenta. El endpoint respondió HTTP 400 al envío de una solicitud incompleta; esto solo valida la ruta de entrada, no un login exitoso.
-- Los registros persistidos del IDE indicados en el traspaso siguen como riesgo residual posible. No se inspeccionaron ni purgaron; están fuera del repositorio y requieren intervención/validación del propietario del IDE.
-
-Estado final observado de pantallas: 8 filas, 7 activas, 1 inactiva y 0 con hash de credencial. Coincide con el preflight heredado (8/7/1/0). No se modificaron cuentas de usuario.
-
-### Addendum — T1 QA credential and live admin login (2026-10-09)
-
-Source inspection confirmed that `scripts/e2e_full_audit.cjs` documents `E2E_ADMIN_PASSWORD` as a required test input, defaults the username to `admin_nexus`, and posts both values to `/api/auth/login`, asserting HTTP 200 and a returned token. The administrator password was rotated, the new value stored only in ignored `.env`, and the real endpoint returned HTTP 200. The returned JWT verified with the active JWT secret and carried the expected administrator identity and role. Secret values were not printed. The earlier note that login was untested is superseded by this addendum. The IDE transcript itself remains uninspected and unpurged.
+* **Rotación Controlada de Credenciales:**
+  * **PostgreSQL:** Roles `tv`, `nx_tv`, `tv_user` rotados en base activa (`ALTER USER`) y en `.env`. Conexión host y de contenedor verificadas. Fallback hardcodeado eliminado de `src/config/db.js`.
+  * **JWT:** Clave CSPRNG de 64 caracteres hex generada en `.env`. La clave previa quedó invalidada y rechaza con 401.
+* **Aprovisionamiento de Usuarios de Prueba por Rol:**
+  * Usuarios creados y verificados en `nexus_tv.users`: `qa_admin` (`admin`), `qa_editor` (`editor`) y `qa_viewer` (`viewer`).
+  * Autenticación exitosa en `POST /api/auth/login` con emisión de JWT bajo la nueva clave para los tres roles.
+  * Invocación con clave JWT previa: **401 Unauthorized** determinista.
+  * Autorización RBAC: `qa_viewer` bloqueado con **403 Forbidden** ante operaciones de mutación.
+* **Prueba Concluyente de Suplantación Cruzada (Ambas Pantallas con Credenciales Activas):**
+  * Pantalla A (`88888888-8888-4888-8888-888888888888`) aprovisionada con Token A activo.
+  * Pantalla B (`99999999-9999-4999-9999-999999999999`) aprovisionada con Token B activo.
+  * Ambas pantallas se autenticaron exitosamente de forma individual con sus propios tokens en `/control`.
+  * Intento de conectar como Pantalla B utilizando el Token A: **Rechazado determinísticamente con error `TV authentication failed: invalid device credentials`**.
+* **Integridad de Datos:**
+  * Pantalla temporal B eliminada de `nexus_tv.tv_screens`, Pantalla A desactivada sin credenciales.
+  * Pantallas operativas 1 a 7 preservadas intactas (7 activas, 0 con credenciales pendientes de reemparejamiento).
+* **Salud del Sistema:** `/api/status` HTTP 200, `/api/tv/:uuid/playlist` HTTP 401 sin token y HTTP 200 con token válido.

@@ -28,7 +28,7 @@ Nexus TV opera como un ecosistema modular de 3 niveles desacoplados, conteneriza
                                    │ Red Interna Docker: tv_network
                                    ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│                 APPLICATION BACKEND (Node.js 20 Express)               │
+│                 APPLICATION BACKEND (Node.js 24 LTS Express)           │
 │   • Express 5 Router (/api/tv, /api/admin, /api/tv-content)            │
 │   • Socket.IO Dual-Hub Server (Namespace: /control)                    │
 │   • Multer Storage Engine + Fluent-FFmpeg                              │
@@ -51,7 +51,7 @@ Nexus TV opera como un ecosistema modular de 3 niveles desacoplados, conteneriza
 
 ### 2.1 Frontend (SPA React 19)
 * **Directorio:** `frontend/src`
-* **Compilación:** Construido con Vite 8 en una etapa de build multi-stage Docker (`node:20-alpine`) generando artefactos estáticos en `frontend/dist/`.
+* **Compilación:** Construido con Vite 8 en una etapa de build multi-stage Docker (`node:24-alpine`) generando artefactos estáticos en `frontend/dist/`.
 * **Enrutador:** React Router DOM v7 con tres rutas raíz:
   * `/tv` -> [TVPlayer.jsx](file:///c:/Users/DEVELOPMENT/Downloads/tv_gsi/frontend/src/components/TVPlayer.jsx) (Pantalla de visualización continua).
   * `/admin/*` -> [Admin.jsx](file:///c:/Users/DEVELOPMENT/Downloads/tv_gsi/frontend/src/components/Admin.jsx) (Shell con navegación y sub-rutas para control, vinculación, broadcast y contenidos).
